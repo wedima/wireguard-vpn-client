@@ -1,9 +1,11 @@
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use tauri::Manager;
 
 use crate::crypto;
+
+#[cfg(not(target_os = "macos"))]
+use std::sync::atomic::Ordering;
 
 #[cfg(not(target_os = "macos"))]
 use crate::wg_tunnel::WgSession;
@@ -73,17 +75,6 @@ fn write_state(app: &tauri::AppHandle, s: &StoredState) -> Result<(), String> {
     ensure_data_dir(app)?;
     let content = serde_json::to_string(s).map_err(|e| e.to_string())?;
     std::fs::write(state_path(app)?, content).map_err(|e| e.to_string())
-}
-
-fn is_connected_sync(state: &AppState) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        state.daemon_stream.blocking_lock().is_some()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        state.session.blocking_lock().is_some()
-    }
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────

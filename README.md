@@ -39,6 +39,7 @@ The user **never sees or touches** the raw WireGuard configuration. Everything i
 - One-button **connect / disconnect**
 - Live **traffic statistics** (↑ upload / ↓ download) updated every second
 - **Connection name** displayed from `# Client name:` comment in config
+- **English + German UI translations** (auto-detected from system language, user-switchable)
 - **IPv6 kill switch** — disables ISP IPv6 when the VPN server doesn't provide an IPv6 tunnel, preventing leaks on public Wi-Fi
 - **System tray** — minimizes to tray, click to show/hide, right-click menu
 - Settings menu: Delete Connection, Uninstall Helper, Quit Application
@@ -68,7 +69,36 @@ sudo usermod -aG tun $USER
 
 ---
 
+## Localization (i18n)
+
+The frontend uses `i18next` + `react-i18next` with JSON locale files.
+
+- Locale files:
+  - `src/i18n/locales/en.json`
+  - `src/i18n/locales/de.json`
+- Initialization:
+  - `src/i18n/index.ts`
+- Language selector UI:
+  - `src/components/LanguageSwitcher.tsx`
+
+### Behavior
+
+- On first run, language is auto-detected from the OS/webview language (`navigator.language`).
+- The selected language is cached in `localStorage` and reused on next launch.
+- This behavior works the same way in Tauri WebView on macOS, Windows, and Linux.
+
+### Add a New Language
+
+1. Create `src/i18n/locales/<code>.json` by copying `en.json`.
+2. Add the locale in `src/i18n/index.ts` resources and `supportedLngs`.
+3. Add an option to `src/components/LanguageSwitcher.tsx`.
+4. Keep keys stable; translate values only.
+
+---
+
 ## Development
+
+This project is standardized on **pnpm**. Keep Tauri hook commands (`beforeDevCommand` / `beforeBuildCommand`) in `src-tauri/tauri.conf.json` set to `pnpm run ...` to avoid npm-specific environment warning noise and keep builds consistent.
 
 ```bash
 # Install frontend dependencies

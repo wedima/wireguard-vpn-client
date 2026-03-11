@@ -1,0 +1,70 @@
+{
+  "common": {
+    "appName": "Wedima VPN WG",
+    "settings": "Settings",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "language": "Language"
+  },
+  "languageSwitcher": {
+    "label": "Language",
+    "english": "English",
+    "german": "German"
+  },
+  "connect": {
+    "deleteConnection": "Delete Connection",
+    "uninstallHelper": "Uninstall Helper",
+    "quitApplication": "Quit Application",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "tunnelActive": "VPN tunnel is active",
+    "enterPasswordToConnect": "Enter your password to connect",
+    "connectionPassword": "Connection Password",
+    "passwordPlaceholder": "Enter your password",
+    "disconnecting": "Disconnecting...",
+    "disconnect": "Disconnect",
+    "connecting": "Connecting...",
+    "connect": "Connect",
+    "deleteTitle": "Delete Connection?",
+    "deleteDescription": "This will permanently remove the stored VPN configuration. You will need to import it again.",
+    "uninstallTitle": "Uninstall Helper?",
+    "uninstallDescription": "This removes the privileged helper daemon. You will need to reinstall it (requires admin) before connecting again.",
+    "uninstall": "Uninstall",
+    "errors": {
+      "missingPassword": "Please enter your connection password."
+    }
+  },
+  "import": {
+    "title": "Import Configuration",
+    "description": "Select your WireGuard config - encrypted or plain. The file type is detected automatically.",
+    "configFileLabel": "WireGuard Config File",
+    "selectFile": "Select .conf or .enc file...",
+    "encrypted": "Encrypted",
+    "plain": "Plain",
+    "decryptionPassword": "Decryption Password",
+    "decryptionPlaceholder": "Enter the password provided by your admin",
+    "plainInfo": "Plain config detected. No decryption needed - you will set a personal connection password in the next step.",
+    "importing": "Importing...",
+    "decryptAndImport": "Decrypt & Import",
+    "import": "Import",
+    "footer": "The config is stored encrypted on your device. You will never see its contents.",
+    "errors": {
+      "selectFile": "Please select a config file.",
+      "enterDecryptionPassword": "Please enter the decryption password."
+    }
+  },
+  "setupPassword": {
+    "title": "Set Connection Password",
+    "description": "This password protects your VPN connection. You will enter it every time you connect.",
+    "newPassword": "New Password",
+    "newPasswordPlaceholder": "Min. 8 characters",
+    "confirmPassword": "Confirm Password",
+    "confirmPasswordPlaceholder": "Repeat password",
+    "settingUp": "Setting up...",
+    "submit": "Set Password & Continue",
+    "errors": {
+      "minLength": "Password must be at least 8 characters.",
+      "mismatch": "Passwords do not match."
+    }
+  }
+}

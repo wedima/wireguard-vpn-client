@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useTranslation } from "react-i18next";
 import {
   FolderOpen,
   Eye,
@@ -11,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import wedimaLogo from "../assets/wedima-logo.svg";
+import LanguageSwitcher from "../components/LanguageSwitcher";
 
 interface Props {
   onImported: () => void;
@@ -19,6 +21,7 @@ interface Props {
 type FileType = "encrypted" | "plain" | null;
 
 export default function ImportScreen({ onImported }: Props) {
+  const { t } = useTranslation();
   const [filePath, setFilePath] = useState<string | null>(null);
   const [fileType, setFileType] = useState<FileType>(null);
   const [detecting, setDetecting] = useState(false);
@@ -62,8 +65,8 @@ export default function ImportScreen({ onImported }: Props) {
   };
 
   const handleImport = async () => {
-    if (!filePath) return setError("Please select a config file.");
-    if (fileType === "encrypted" && !password) return setError("Please enter the decryption password.");
+    if (!filePath) return setError(t("import.errors.selectFile"));
+    if (fileType === "encrypted" && !password) return setError(t("import.errors.enterDecryptionPassword"));
 
     setLoading(true);
     setError(null);
@@ -85,19 +88,20 @@ export default function ImportScreen({ onImported }: Props) {
 
   return (
     <div className="flex h-screen flex-col bg-bg">
-      <div className="flex items-center border-b border-border px-6 py-4">
-        <img src={wedimaLogo} alt="Wedima VPN WG" className="h-6 brightness-0 invert" />
+      <div className="flex items-center justify-between border-b border-border px-6 py-4">
+        <img src={wedimaLogo} alt={t("common.appName")} className="h-6 brightness-0 invert" />
+        <LanguageSwitcher />
       </div>
 
       <div className="flex flex-1 flex-col justify-center px-8">
-        <h1 className="mb-1 text-xl font-semibold text-text-main">Import Configuration</h1>
+        <h1 className="mb-1 text-xl font-semibold text-text-main">{t("import.title")}</h1>
         <p className="mb-8 text-sm text-text-muted">
-          Select your WireGuard config — encrypted or plain. The file type is detected automatically.
+          {t("import.description")}
         </p>
 
         <div className="mb-5">
           <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-text-muted">
-            WireGuard Config File
+            {t("import.configFileLabel")}
           </label>
 
           {!filePath ? (
@@ -106,7 +110,7 @@ export default function ImportScreen({ onImported }: Props) {
               className="flex w-full items-center gap-3 rounded-lg border border-dashed border-border bg-surface px-4 py-3 text-sm transition-colors hover:border-primary/50 hover:bg-surface/80"
             >
               <FolderOpen className="h-4 w-4 shrink-0 text-text-muted" />
-              <span className="text-text-muted">Select .conf or .enc file...</span>
+              <span className="text-text-muted">{t("import.selectFile")}</span>
             </button>
           ) : (
             <div
@@ -136,7 +140,7 @@ export default function ImportScreen({ onImported }: Props) {
                       : "bg-primary/20 text-primary"
                   }`}
                 >
-                  {fileType === "encrypted" ? "Encrypted" : "Plain"}
+                  {fileType === "encrypted" ? t("import.encrypted") : t("import.plain")}
                 </span>
               )}
 
@@ -153,7 +157,7 @@ export default function ImportScreen({ onImported }: Props) {
         {fileType === "encrypted" && (
           <div className="mb-6">
             <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-text-muted">
-              Decryption Password
+              {t("import.decryptionPassword")}
             </label>
             <div className="relative">
               <input
@@ -161,7 +165,7 @@ export default function ImportScreen({ onImported }: Props) {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleImport()}
-                placeholder="Enter the password provided by your admin"
+                placeholder={t("import.decryptionPlaceholder")}
                 autoFocus
                 className="w-full rounded-lg border border-border bg-surface px-4 py-3 pr-11 text-sm text-text-main placeholder-text-muted outline-none transition-colors focus:border-primary/60"
               />
@@ -177,7 +181,7 @@ export default function ImportScreen({ onImported }: Props) {
 
         {fileType === "plain" && (
           <div className="mb-6 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-text-muted">
-            Plain config detected. No decryption needed — you will set a personal connection password in the next step.
+            {t("import.plainInfo")}
           </div>
         )}
 
@@ -199,17 +203,17 @@ export default function ImportScreen({ onImported }: Props) {
           {loading ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin" />
-              Importing...
+              {t("import.importing")}
             </>
           ) : fileType === "encrypted" ? (
-            "Decrypt & Import"
+            t("import.decryptAndImport")
           ) : (
-            "Import"
+            t("import.import")
           )}
         </button>
 
         <p className="mt-6 text-center text-xs text-text-muted">
-          The config is stored encrypted on your device. You will never see its contents.
+          {t("import.footer")}
         </p>
       </div>
     </div>

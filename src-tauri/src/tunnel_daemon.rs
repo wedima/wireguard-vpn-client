@@ -386,7 +386,7 @@ async fn run_tunnel(
 
     let (tun_fd, iface) = create_utun_fd()?;
 
-    let (iface_addr, prefix_len) = config
+    let (iface_addr, _prefix_len) = config
         .interface
         .addresses
         .iter()

@@ -6,7 +6,6 @@ pub struct WgInterface {
     pub addresses: Vec<String>,
     pub dns: Vec<String>,
     pub mtu: u32,
-    pub listen_port: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +41,6 @@ pub fn parse(conf: &str) -> Result<WgConfig, String> {
     let mut iface_addrs: Vec<String> = vec![];
     let mut iface_dns: Vec<String> = vec![];
     let mut iface_mtu: u32 = 1420;
-    let mut listen_port: Option<u16> = None;
 
     let mut peers: Vec<WgPeer> = vec![];
     let mut p_pub: Option<[u8; 32]> = None;
@@ -114,7 +112,7 @@ pub fn parse(conf: &str) -> Result<WgConfig, String> {
                 "Address" => iface_addrs.extend(v.split(',').map(|s| s.trim().to_string())),
                 "DNS" => iface_dns.extend(v.split(',').map(|s| s.trim().to_string())),
                 "MTU" => iface_mtu = v.parse().unwrap_or(1420),
-                "ListenPort" => listen_port = v.parse().ok(),
+                "ListenPort" => {}
                 _ => {}
             },
             "peer" => match k {
@@ -149,18 +147,9 @@ pub fn parse(conf: &str) -> Result<WgConfig, String> {
             addresses: iface_addrs,
             dns: iface_dns,
             mtu: iface_mtu,
-            listen_port,
         },
         peers,
         name,
     })
 }
 
-pub fn cidr_to_netmask(prefix_len: u8) -> String {
-    if prefix_len == 0 {
-        return "0.0.0.0".to_string();
-    }
-    let mask: u32 = !0u32 << (32 - prefix_len);
-    let b = mask.to_be_bytes();
-    format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
-}

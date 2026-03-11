@@ -1,7 +1,9 @@
 mod commands;
 mod crypto;
 mod wg_config;
+#[cfg(not(target_os = "macos"))]
 mod wg_tunnel;
+#[cfg(not(target_os = "macos"))]
 mod wireguard;
 
 #[cfg(target_os = "macos")]

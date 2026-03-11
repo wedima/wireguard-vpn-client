@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Eye, EyeOff, Loader2, Settings, Wifi, WifiOff, Trash2, Wrench, ArrowUp, ArrowDown, LogOut } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import wedimaLogo from "../assets/wedima-logo.svg";
+import LanguageSwitcher from "../components/LanguageSwitcher";
 
 interface Props {
   isConnected: boolean;
@@ -24,6 +26,7 @@ function formatBytes(bytes: number): string {
 }
 
 export default function ConnectScreen({ isConnected, connectionName, onStatusChange, onReset }: Props) {
+  const { t } = useTranslation();
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -61,7 +64,7 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
   }, [isConnected]);
 
   const handleConnect = async () => {
-    if (!password) return setError("Please enter your connection password.");
+    if (!password) return setError(t("connect.errors.missingPassword"));
     setLoading(true);
     setError(null);
     try {
@@ -110,16 +113,18 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
     <div className="flex h-screen flex-col bg-bg">
       <div className="flex items-center justify-between border-b border-border px-6 py-4">
         <div className="flex flex-col justify-center">
-          <img src={wedimaLogo} alt="Wedima VPN WG" className="h-5 brightness-0 invert" />
+          <img src={wedimaLogo} alt={t("common.appName")} className="h-5 brightness-0 invert" />
           {connectionName && (
             <div className="mt-0.5 text-xs text-text-muted">{connectionName}</div>
           )}
         </div>
-        <div className="relative" ref={settingsRef}>
+        <div className="flex items-center gap-2">
+          <LanguageSwitcher />
+          <div className="relative" ref={settingsRef}>
           <button
             onClick={() => setShowSettings((v) => !v)}
             className="rounded-md p-1.5 text-text-muted transition-colors hover:bg-surface hover:text-text-main"
-            title="Settings"
+            title={t("common.settings")}
           >
             <Settings className="h-4 w-4" />
           </button>
@@ -130,7 +135,7 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
                 className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-danger transition-colors hover:bg-danger/10"
               >
                 <Trash2 className="h-4 w-4 shrink-0" />
-                Delete Connection
+                {t("connect.deleteConnection")}
               </button>
               <div className="border-t border-border" />
               <button
@@ -138,7 +143,7 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
                 className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-text-muted transition-colors hover:bg-surface hover:text-text-main"
               >
                 <Wrench className="h-4 w-4 shrink-0" />
-                Uninstall Helper
+                {t("connect.uninstallHelper")}
               </button>
               <div className="border-t border-border" />
               <button
@@ -146,10 +151,11 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
                 className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-text-muted transition-colors hover:bg-surface hover:text-text-main"
               >
                 <LogOut className="h-4 w-4 shrink-0" />
-                Quit Application
+                {t("connect.quitApplication")}
               </button>
             </div>
           )}
+          </div>
         </div>
       </div>
 
@@ -183,7 +189,7 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
                   isConnected ? "bg-primary" : "bg-text-muted"
                 }`}
               />
-              {isConnected ? "Connected" : "Disconnected"}
+              {isConnected ? t("connect.connected") : t("connect.disconnected")}
             </div>
             {isConnected && stats ? (
               <div className="mt-1 flex items-center justify-center gap-4 text-xs text-text-muted">
@@ -198,7 +204,7 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
               </div>
             ) : (
               <p className="text-xs text-text-muted">
-                {isConnected ? "VPN tunnel is active" : "Enter your password to connect"}
+                {isConnected ? t("connect.tunnelActive") : t("connect.enterPasswordToConnect")}
               </p>
             )}
           </div>
@@ -207,7 +213,7 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
         {!isConnected && (
           <div className="mb-5 w-full">
             <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-text-muted">
-              Connection Password
+              {t("connect.connectionPassword")}
             </label>
             <div className="relative">
               <input
@@ -215,7 +221,7 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleConnect()}
-                placeholder="Enter your password"
+                placeholder={t("connect.passwordPlaceholder")}
                 autoFocus
                 className="w-full rounded-lg border border-border bg-surface px-4 py-3 pr-11 text-sm text-text-main placeholder-text-muted outline-none transition-colors focus:border-primary/60"
               />
@@ -244,12 +250,12 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
             {loading ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Disconnecting...
+                {t("connect.disconnecting")}
               </>
             ) : (
               <>
                 <WifiOff className="h-4 w-4" />
-                Disconnect
+                {t("connect.disconnect")}
               </>
             )}
           </button>
@@ -262,12 +268,12 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
             {loading ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Connecting...
+                {t("connect.connecting")}
               </>
             ) : (
               <>
                 <Wifi className="h-4 w-4" />
-                Connect
+                {t("connect.connect")}
               </>
             )}
           </button>
@@ -277,22 +283,22 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
       {showDeleteConfirm && (
         <div className="absolute inset-0 flex items-center justify-center bg-bg/90 backdrop-blur-sm">
           <div className="mx-6 rounded-xl border border-border bg-surface p-6 shadow-xl">
-            <h2 className="mb-2 text-base font-semibold text-text-main">Delete Connection?</h2>
+            <h2 className="mb-2 text-base font-semibold text-text-main">{t("connect.deleteTitle")}</h2>
             <p className="mb-5 text-sm text-text-muted">
-              This will permanently remove the stored VPN configuration. You will need to import it again.
+              {t("connect.deleteDescription")}
             </p>
             <div className="flex gap-3">
               <button
                 onClick={() => setShowDeleteConfirm(false)}
                 className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-main transition-colors hover:bg-border/30"
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={handleDelete}
                 className="flex-1 rounded-lg bg-danger px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-danger-hover"
               >
-                Delete
+                {t("common.delete")}
               </button>
             </div>
           </div>
@@ -302,22 +308,22 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
       {showUninstallConfirm && (
         <div className="absolute inset-0 flex items-center justify-center bg-bg/90 backdrop-blur-sm">
           <div className="mx-6 rounded-xl border border-border bg-surface p-6 shadow-xl">
-            <h2 className="mb-2 text-base font-semibold text-text-main">Uninstall Helper?</h2>
+            <h2 className="mb-2 text-base font-semibold text-text-main">{t("connect.uninstallTitle")}</h2>
             <p className="mb-5 text-sm text-text-muted">
-              This removes the privileged helper daemon. You will need to reinstall it (requires admin) before connecting again.
+              {t("connect.uninstallDescription")}
             </p>
             <div className="flex gap-3">
               <button
                 onClick={() => setShowUninstallConfirm(false)}
                 className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-main transition-colors hover:bg-border/30"
               >
-                Cancel
+                {t("common.cancel")}
               </button>
               <button
                 onClick={handleUninstallHelper}
                 className="flex-1 rounded-lg bg-danger px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-danger-hover"
               >
-                Uninstall
+                {t("connect.uninstall")}
               </button>
             </div>
           </div>
