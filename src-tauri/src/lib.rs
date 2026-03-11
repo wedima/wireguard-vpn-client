@@ -16,6 +16,12 @@ use tauri::{
     Manager,
 };
 
+#[cfg(target_os = "macos")]
+use cocoa::{
+    appkit::{NSApp, NSApplication},
+    base::YES,
+};
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -76,6 +82,20 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+
+                unsafe {
+                    // Keep Accessory policy, but still make the app active at launch.
+                    NSApp().activateIgnoringOtherApps_(YES);
+                }
+            }
 
             Ok(())
         })

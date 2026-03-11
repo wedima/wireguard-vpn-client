@@ -212,7 +212,7 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
 
         {!isConnected && (
           <div className="mb-5 w-full">
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-text-muted">
+            <label className="mb-2 block text-xs font-medium tracking-wider text-text-muted">
               {t("connect.connectionPassword")}
             </label>
             <div className="relative">
