@@ -4,6 +4,12 @@ import { Eye, EyeOff, Loader2, KeyRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import wedimaLogo from "../assets/wedima-logo.svg";
 import LanguageSwitcher from "../components/LanguageSwitcher";
+import { ThemeToggle } from "../components/ThemeToggle";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { cn } from "../lib/utils";
 
 interface Props {
   onPasswordSet: () => void;
@@ -37,100 +43,105 @@ export default function SetupPasswordScreen({ onPasswordSet }: Props) {
     }
   };
 
+  const strengthSegments = [0, 1, 2, 3].map((i) => {
+    const filled = password.length >= (i + 1) * 3;
+    return filled
+      ? i < 1 ? "bg-destructive"
+      : i < 2 ? "bg-warning"
+      : i < 3 ? "bg-primary/70"
+      : "bg-primary"
+      : "bg-border";
+  });
+
   return (
-    <div className="flex h-screen flex-col bg-bg">
-      <div className="flex items-center justify-between border-b border-border px-6 py-4">
-        <img src={wedimaLogo} alt={t("common.appName")} className="h-6 brightness-0 invert" />
-        <LanguageSwitcher />
-      </div>
-
-      <div className="flex flex-1 flex-col justify-center px-8">
-        <div className="mb-6 flex h-12 w-12 items-center justify-center rounded-xl border border-primary/30 bg-primary/10">
-          <KeyRound className="h-6 w-6 text-primary" />
+    <div className="flex h-screen flex-col bg-background">
+      <header className="flex items-center justify-between border-b px-4 py-3">
+        <img src={wedimaLogo} alt={t("common.appName")} className="h-5 brightness-0 dark:invert" />
+        <div className="flex items-center gap-1">
+          <LanguageSwitcher />
+          <ThemeToggle />
         </div>
+      </header>
 
-        <h1 className="mb-1 text-xl font-semibold text-text-main">{t("setupPassword.title")}</h1>
-        <p className="mb-8 text-sm text-text-muted">
-          {t("setupPassword.description")}
-        </p>
-
-        <div className="mb-4">
-          <label className="mb-2 block text-xs font-medium tracking-wider text-text-muted">
-            {t("setupPassword.newPassword")}
-          </label>
-          <div className="relative">
-            <input
-              type={showPassword ? "text" : "password"}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={t("setupPassword.newPasswordPlaceholder")}
-              className="w-full rounded-lg border border-border bg-surface px-4 py-3 pr-11 text-sm text-text-main placeholder-text-muted outline-none transition-colors focus:border-primary/60"
-            />
-            <button
-              onClick={() => setShowPassword((v) => !v)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-main"
-            >
-              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </button>
+      <main className="flex flex-1 flex-col justify-center px-6">
+        <div className="w-full max-w-xs mx-auto">
+          <div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg border bg-card">
+            <KeyRound className="h-5 w-5 text-primary" />
           </div>
-        </div>
 
-        <div className="mb-6">
-          <label className="mb-2 block text-xs font-medium tracking-wider text-text-muted">
-            {t("setupPassword.confirmPassword")}
-          </label>
-          <input
-            type={showPassword ? "text" : "password"}
-            value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-            placeholder={t("setupPassword.confirmPasswordPlaceholder")}
-            className="w-full rounded-lg border border-border bg-surface px-4 py-3 text-sm text-text-main placeholder-text-muted outline-none transition-colors focus:border-primary/60"
-          />
-        </div>
+          <h1 className="mb-1 text-lg font-semibold tracking-tight">{t("setupPassword.title")}</h1>
+          <p className="mb-6 text-sm text-muted-foreground">
+            {t("setupPassword.description")}
+          </p>
 
-        {password.length > 0 && (
-          <div className="mb-4 flex gap-1">
-            {[...Array(4)].map((_, i) => (
-              <div
-                key={i}
-                className={`h-1 flex-1 rounded-full transition-colors ${
-                  password.length >= (i + 1) * 3
-                    ? i < 1
-                      ? "bg-danger"
-                      : i < 2
-                        ? "bg-yellow-500"
-                        : i < 3
-                          ? "bg-primary/70"
-                          : "bg-primary"
-                    : "bg-border"
-                }`}
+          <div className="mb-3 space-y-1.5">
+            <Label htmlFor="new-password">{t("setupPassword.newPassword")}</Label>
+            <div className="relative">
+              <Input
+                id="new-password"
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={t("setupPassword.newPasswordPlaceholder")}
+                className="pr-10"
               />
-            ))}
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute right-0 top-0 h-full w-10 rounded-l-none text-muted-foreground"
+              >
+                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </Button>
+            </div>
           </div>
-        )}
 
-        {error && (
-          <div className="mb-4 rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-            {error}
-          </div>
-        )}
-
-        <button
-          onClick={handleSubmit}
-          disabled={loading || !password || !confirm}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-bg transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {loading ? (
-            <>
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {t("setupPassword.settingUp")}
-            </>
-          ) : (
-            t("setupPassword.submit")
+          {password.length > 0 && (
+            <div className="mb-3 flex gap-1">
+              {strengthSegments.map((colorClass, i) => (
+                <div
+                  key={i}
+                  className={cn("h-1 flex-1 rounded-full transition-colors", colorClass)}
+                />
+              ))}
+            </div>
           )}
-        </button>
-      </div>
+
+          <div className="mb-5 space-y-1.5">
+            <Label htmlFor="confirm-password">{t("setupPassword.confirmPassword")}</Label>
+            <Input
+              id="confirm-password"
+              type={showPassword ? "text" : "password"}
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+              placeholder={t("setupPassword.confirmPasswordPlaceholder")}
+            />
+          </div>
+
+          {error && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+
+          <Button
+            onClick={handleSubmit}
+            disabled={loading || !password || !confirm}
+            className="w-full"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="animate-spin" />
+                {t("setupPassword.settingUp")}
+              </>
+            ) : (
+              t("setupPassword.submit")
+            )}
+          </Button>
+        </div>
+      </main>
     </div>
   );
 }

@@ -1,9 +1,35 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Eye, EyeOff, Loader2, Settings, Wifi, WifiOff, Trash2, Wrench, ArrowUp, ArrowDown, LogOut } from "lucide-react";
+import {
+  Eye, EyeOff, Loader2, Settings2, Wifi, WifiOff,
+  Trash2, Wrench, ArrowUp, ArrowDown, LogOut,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import wedimaLogo from "../assets/wedima-logo.svg";
 import LanguageSwitcher from "../components/LanguageSwitcher";
+import { ThemeToggle } from "../components/ThemeToggle";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { Card, CardContent } from "../components/ui/card";
+import { Separator } from "../components/ui/separator";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuDestructiveItem,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "../components/ui/dialog";
 
 interface Props {
   isConnected: boolean;
@@ -31,21 +57,9 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showUninstallConfirm, setShowUninstallConfirm] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
-  const settingsRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
-        setShowSettings(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
 
   useEffect(() => {
     if (!isConnected) {
@@ -110,225 +124,205 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
   };
 
   return (
-    <div className="flex h-screen flex-col bg-bg">
-      <div className="flex items-center justify-between border-b border-border px-6 py-4">
+    <div className="flex h-screen flex-col bg-background">
+      <header className="flex items-center justify-between border-b px-4 py-3">
         <div className="flex flex-col justify-center">
-          <img src={wedimaLogo} alt={t("common.appName")} className="h-5 brightness-0 invert" />
+          <img src={wedimaLogo} alt={t("common.appName")} className="h-5 brightness-0 dark:invert" />
           {connectionName && (
-            <div className="mt-0.5 text-xs text-text-muted">{connectionName}</div>
+            <span className="mt-0.5 text-xs text-muted-foreground">{connectionName}</span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
+          <ThemeToggle />
           <LanguageSwitcher />
-          <div className="relative" ref={settingsRef}>
-          <button
-            onClick={() => setShowSettings((v) => !v)}
-            className="rounded-md p-1.5 text-text-muted transition-colors hover:bg-surface hover:text-text-main"
-            title={t("common.settings")}
-          >
-            <Settings className="h-4 w-4" />
-          </button>
-          {showSettings && (
-            <div className="absolute right-0 top-full z-50 mt-1 min-w-[200px] rounded-lg border border-border bg-surface shadow-xl">
-              <button
-                onClick={() => { setShowSettings(false); setShowDeleteConfirm(true); }}
-                className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-danger transition-colors hover:bg-danger/10"
-              >
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" title={t("common.settings")}>
+                <Settings2 className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuDestructiveItem onClick={() => setShowDeleteConfirm(true)}>
                 <Trash2 className="h-4 w-4 shrink-0" />
                 {t("connect.deleteConnection")}
-              </button>
-              <div className="border-t border-border" />
-              <button
-                onClick={() => { setShowSettings(false); setShowUninstallConfirm(true); }}
-                className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-text-muted transition-colors hover:bg-surface hover:text-text-main"
-              >
+              </DropdownMenuDestructiveItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => setShowUninstallConfirm(true)}>
                 <Wrench className="h-4 w-4 shrink-0" />
                 {t("connect.uninstallHelper")}
-              </button>
-              <div className="border-t border-border" />
-              <button
-                onClick={() => { setShowSettings(false); invoke("quit_app"); }}
-                className="flex w-full items-center gap-3 px-4 py-3 text-left text-sm text-text-muted transition-colors hover:bg-surface hover:text-text-main"
-              >
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => invoke("quit_app")}>
                 <LogOut className="h-4 w-4 shrink-0" />
                 {t("connect.quitApplication")}
-              </button>
-            </div>
-          )}
-          </div>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
-      </div>
+      </header>
 
-      <div className="flex flex-1 flex-col items-center justify-center px-8">
-        <div className="mb-8 flex flex-col items-center gap-4">
-          <div
-            className={`relative flex h-24 w-24 items-center justify-center rounded-full border-2 transition-all duration-500 ${
-              isConnected
-                ? "border-primary bg-primary/10"
-                : "border-border bg-surface"
-            }`}
-          >
-            {isConnected && (
-              <span className="absolute inset-0 animate-ping rounded-full bg-primary/20" />
-            )}
-            {isConnected ? (
-              <Wifi className="h-10 w-10 text-primary" />
-            ) : (
-              <WifiOff className="h-10 w-10 text-text-muted" />
-            )}
-          </div>
-
-          <div className="text-center">
+      <main className="flex flex-1 flex-col items-center justify-center px-6">
+        <div className="w-full max-w-xs">
+          <div className="mb-8 flex flex-col items-center gap-3">
             <div
-              className={`mb-1 flex items-center justify-center gap-2 text-lg font-semibold ${
-                isConnected ? "text-primary" : "text-text-muted"
+              className={`relative flex h-20 w-20 items-center justify-center rounded-full border-2 transition-all duration-500 ${
+                isConnected
+                  ? "border-primary bg-primary/10"
+                  : "border-border bg-card"
               }`}
             >
-              <span
-                className={`inline-block h-2 w-2 rounded-full ${
-                  isConnected ? "bg-primary" : "bg-text-muted"
+              {isConnected && (
+                <span className="absolute inset-0 animate-ping rounded-full bg-primary/20" />
+              )}
+              {isConnected ? (
+                <Wifi className="h-9 w-9 text-primary" />
+              ) : (
+                <WifiOff className="h-9 w-9 text-muted-foreground" />
+              )}
+            </div>
+
+            <div className="text-center">
+              <div
+                className={`mb-1 flex items-center justify-center gap-1.5 text-sm font-semibold ${
+                  isConnected ? "text-primary" : "text-muted-foreground"
                 }`}
-              />
-              {isConnected ? t("connect.connected") : t("connect.disconnected")}
-            </div>
-            {isConnected && stats ? (
-              <div className="mt-1 flex items-center justify-center gap-4 text-xs text-text-muted">
-                <span className="flex items-center gap-1">
-                  <ArrowUp className="h-3 w-3 text-primary" />
-                  {formatBytes(stats.bytes_tx)}
-                </span>
-                <span className="flex items-center gap-1">
-                  <ArrowDown className="h-3 w-3 text-primary" />
-                  {formatBytes(stats.bytes_rx)}
-                </span>
+              >
+                <span
+                  className={`inline-block h-1.5 w-1.5 rounded-full ${
+                    isConnected ? "bg-primary" : "bg-muted-foreground"
+                  }`}
+                />
+                {isConnected ? t("connect.connected") : t("connect.disconnected")}
               </div>
-            ) : (
-              <p className="text-xs text-text-muted">
-                {isConnected ? t("connect.tunnelActive") : t("connect.enterPasswordToConnect")}
-              </p>
-            )}
-          </div>
-        </div>
-
-        {!isConnected && (
-          <div className="mb-5 w-full">
-            <label className="mb-2 block text-xs font-medium tracking-wider text-text-muted">
-              {t("connect.connectionPassword")}
-            </label>
-            <div className="relative">
-              <input
-                type={showPassword ? "text" : "password"}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleConnect()}
-                placeholder={t("connect.passwordPlaceholder")}
-                autoFocus
-                className="w-full rounded-lg border border-border bg-surface px-4 py-3 pr-11 text-sm text-text-main placeholder-text-muted outline-none transition-colors focus:border-primary/60"
-              />
-              <button
-                onClick={() => setShowPassword((v) => !v)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-main"
-              >
-                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
+              {isConnected && stats ? (
+                <Card className="mt-2">
+                  <CardContent className="flex items-center gap-6 px-5 py-3">
+                    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <ArrowUp className="h-3 w-3 text-primary" />
+                      {formatBytes(stats.bytes_tx)}
+                    </span>
+                    <Separator orientation="vertical" className="h-4" />
+                    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <ArrowDown className="h-3 w-3 text-primary" />
+                      {formatBytes(stats.bytes_rx)}
+                    </span>
+                  </CardContent>
+                </Card>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {isConnected ? t("connect.tunnelActive") : t("connect.enterPasswordToConnect")}
+                </p>
+              )}
             </div>
           </div>
-        )}
 
-        {error && (
-          <div className="mb-4 w-full rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
-            {error}
-          </div>
-        )}
-
-        {isConnected ? (
-          <button
-            onClick={handleDisconnect}
-            disabled={loading}
-            className="flex w-full items-center justify-center gap-2 rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-sm font-semibold text-danger transition-colors hover:bg-danger/20 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {loading ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                {t("connect.disconnecting")}
-              </>
-            ) : (
-              <>
-                <WifiOff className="h-4 w-4" />
-                {t("connect.disconnect")}
-              </>
-            )}
-          </button>
-        ) : (
-          <button
-            onClick={handleConnect}
-            disabled={loading || !password}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-bg transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {loading ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                {t("connect.connecting")}
-              </>
-            ) : (
-              <>
-                <Wifi className="h-4 w-4" />
-                {t("connect.connect")}
-              </>
-            )}
-          </button>
-        )}
-      </div>
-
-      {showDeleteConfirm && (
-        <div className="absolute inset-0 flex items-center justify-center bg-bg/90 backdrop-blur-sm">
-          <div className="mx-6 rounded-xl border border-border bg-surface p-6 shadow-xl">
-            <h2 className="mb-2 text-base font-semibold text-text-main">{t("connect.deleteTitle")}</h2>
-            <p className="mb-5 text-sm text-text-muted">
-              {t("connect.deleteDescription")}
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowDeleteConfirm(false)}
-                className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-main transition-colors hover:bg-border/30"
-              >
-                {t("common.cancel")}
-              </button>
-              <button
-                onClick={handleDelete}
-                className="flex-1 rounded-lg bg-danger px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-danger-hover"
-              >
-                {t("common.delete")}
-              </button>
+          {!isConnected && (
+            <div className="mb-4 space-y-1.5">
+              <Label htmlFor="password">{t("connect.connectionPassword")}</Label>
+              <div className="relative">
+                <Input
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleConnect()}
+                  placeholder={t("connect.passwordPlaceholder")}
+                  autoFocus
+                  className="pr-10"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute right-0 top-0 h-full w-10 rounded-l-none text-muted-foreground"
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </Button>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          )}
 
-      {showUninstallConfirm && (
-        <div className="absolute inset-0 flex items-center justify-center bg-bg/90 backdrop-blur-sm">
-          <div className="mx-6 rounded-xl border border-border bg-surface p-6 shadow-xl">
-            <h2 className="mb-2 text-base font-semibold text-text-main">{t("connect.uninstallTitle")}</h2>
-            <p className="mb-5 text-sm text-text-muted">
-              {t("connect.uninstallDescription")}
-            </p>
-            <div className="flex gap-3">
-              <button
-                onClick={() => setShowUninstallConfirm(false)}
-                className="flex-1 rounded-lg border border-border px-4 py-2.5 text-sm font-medium text-text-main transition-colors hover:bg-border/30"
-              >
-                {t("common.cancel")}
-              </button>
-              <button
-                onClick={handleUninstallHelper}
-                className="flex-1 rounded-lg bg-danger px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-danger-hover"
-              >
-                {t("connect.uninstall")}
-              </button>
-            </div>
-          </div>
+          {error && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+
+          {isConnected ? (
+            <Button
+              variant="destructive"
+              className="w-full"
+              onClick={handleDisconnect}
+              disabled={loading}
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="animate-spin" />
+                  {t("connect.disconnecting")}
+                </>
+              ) : (
+                <>
+                  <WifiOff />
+                  {t("connect.disconnect")}
+                </>
+              )}
+            </Button>
+          ) : (
+            <Button
+              className="w-full"
+              onClick={handleConnect}
+              disabled={loading || !password}
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="animate-spin" />
+                  {t("connect.connecting")}
+                </>
+              ) : (
+                <>
+                  <Wifi />
+                  {t("connect.connect")}
+                </>
+              )}
+            </Button>
+          )}
         </div>
-      )}
+      </main>
+
+      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("connect.deleteTitle")}</DialogTitle>
+            <DialogDescription>{t("connect.deleteDescription")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" className="flex-1" onClick={() => setShowDeleteConfirm(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button variant="destructive" className="flex-1" onClick={handleDelete}>
+              {t("common.delete")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showUninstallConfirm} onOpenChange={setShowUninstallConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("connect.uninstallTitle")}</DialogTitle>
+            <DialogDescription>{t("connect.uninstallDescription")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" className="flex-1" onClick={() => setShowUninstallConfirm(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button variant="destructive" className="flex-1" onClick={handleUninstallHelper}>
+              {t("connect.uninstall")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

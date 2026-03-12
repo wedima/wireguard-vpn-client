@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Loader2 } from "lucide-react";
 import ImportScreen from "./screens/ImportScreen";
 import SetupPasswordScreen from "./screens/SetupPasswordScreen";
 import ConnectScreen from "./screens/ConnectScreen";
+import { ThemeProvider } from "./components/ThemeProvider";
 
 export interface StatusResult {
   has_config: boolean;
@@ -13,7 +15,7 @@ export interface StatusResult {
 
 type Screen = "loading" | "import" | "setup-password" | "connect";
 
-export default function App() {
+function AppContent() {
   const [screen, setScreen] = useState<Screen>("loading");
   const [isConnected, setIsConnected] = useState(false);
   const [connectionName, setConnectionName] = useState<string | null>(null);
@@ -41,8 +43,8 @@ export default function App() {
 
   if (screen === "loading") {
     return (
-      <div className="flex h-screen items-center justify-center bg-bg">
-        <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin-slow" />
+      <div className="flex h-screen items-center justify-center bg-background">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
       </div>
     );
   }
@@ -65,5 +67,13 @@ export default function App() {
         refresh();
       }}
     />
+  );
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <AppContent />
+    </ThemeProvider>
   );
 }
