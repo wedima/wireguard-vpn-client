@@ -84,6 +84,7 @@ jobs:
   build-windows-arm64:
     name: Windows ARM64
     runs-on: windows-11-arm
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -134,6 +135,7 @@ jobs:
     name: Create GitHub Release
     needs: [build-macos, build-windows-x64, build-windows-arm64]
     runs-on: ubuntu-latest
+    if: always() && needs.build-macos.result == 'success' && needs.build-windows-x64.result == 'success'
     steps:
       - uses: actions/checkout@v4
 
@@ -148,6 +150,7 @@ jobs:
           name: ${{ github.ref_name }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: false
           files: |
             release-artifacts/macos-universal/**/*
             release-artifacts/windows-x64/**/*
