@@ -45,3 +45,6 @@ Icon?
 # Sensitive / runtime
 *.enc
 config.enc
+
+# Local release artifacts
+releases/

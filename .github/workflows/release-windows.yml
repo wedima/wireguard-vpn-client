@@ -1,0 +1,94 @@
+name: Release Windows (Nachliefern)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (e.g. v0.2.0)'
+        required: true
+        type: string
+      target:
+        description: 'Which Windows target to build'
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - x64
+          - arm64
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-x64:
+    name: Windows x64
+    if: ${{ inputs.target == 'both' || inputs.target == 'x64' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install frontend deps
+        run: pnpm install
+
+      - name: Build Windows x64
+        run: pnpm tauri build --target x86_64-pc-windows-msvc
+
+      - name: Upload to existing release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+
+  build-windows-arm64:
+    name: Windows ARM64
+    if: ${{ inputs.target == 'both' || inputs.target == 'arm64' }}
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Install frontend deps
+        run: pnpm install
+
+      - name: Build Windows ARM64
+        run: pnpm tauri build --target aarch64-pc-windows-msvc
+
+      - name: Upload to existing release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/msi/*.msi

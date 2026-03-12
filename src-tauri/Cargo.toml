@@ -2,6 +2,7 @@
 name = "wedima-vpn-wg"
 version = "0.1.0"
 edition = "2021"
+authors = ["wedima"]
 
 [lib]
 name = "wedima_vpn_wg_lib"
