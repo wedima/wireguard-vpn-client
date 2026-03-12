@@ -46,6 +46,9 @@ jobs:
       - name: Install frontend deps
         run: pnpm install
 
+      - name: Generate icons
+        run: pnpm tauri icon src/assets/icon.svg
+
       - name: Build Windows x64
         run: pnpm tauri build --target x86_64-pc-windows-msvc
 
@@ -75,20 +78,36 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      - name: Install LLVM
+        run: choco install llvm -y
+        shell: pwsh
+
+      - name: Add LLVM to PATH
+        run: echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+        shell: pwsh
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-pc-windows-msvc
+          targets: aarch64-pc-windows-gnullvm
 
       - name: Install frontend deps
         run: pnpm install
 
+      - name: Generate icons
+        run: pnpm tauri icon src/assets/icon.svg
+
       - name: Build Windows ARM64
-        run: pnpm tauri build --target aarch64-pc-windows-msvc
+        run: pnpm tauri build --target aarch64-pc-windows-gnullvm
+        env:
+          CC_aarch64_pc_windows_gnullvm: clang
+          CXX_aarch64_pc_windows_gnullvm: clang++
+          AR_aarch64_pc_windows_gnullvm: llvm-ar
+          CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER: lld-link
 
       - name: Upload to existing release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
           files: |
-            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
-            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/aarch64-pc-windows-gnullvm/release/bundle/nsis/*.exe
+            src-tauri/target/aarch64-pc-windows-gnullvm/release/bundle/msi/*.msi
