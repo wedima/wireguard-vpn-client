@@ -509,19 +509,24 @@ async fn handle_client<R, W>(
         return;
     }
 
-    if line.trim() == "STATS" {
+    let cmd = line.trim();
+    if cmd == "STATS" {
         let tx = bytes_tx.load(Ordering::Relaxed);
         let rx = bytes_rx.load(Ordering::Relaxed);
         let _ = writer.write_all(format!("{} {}\n", tx, rx).as_bytes()).await;
         return;
     }
 
-    if !line.starts_with("START ") {
+    if cmd == "SHUTDOWN" {
+        std::process::exit(0);
+    }
+
+    if !cmd.starts_with("START ") {
         let _ = writer.write_all(b"ERROR invalid command\n").await;
         return;
     }
 
-    let config_b64 = line.trim()[6..].to_string();
+    let config_b64 = cmd[6..].to_string();
     let config_bytes = match B64.decode(&config_b64) {
         Ok(b) => b,
         Err(e) => {

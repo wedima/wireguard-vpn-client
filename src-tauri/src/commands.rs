@@ -35,8 +35,7 @@ fn relaunch_as_admin(app: &tauri::AppHandle) -> Result<(), String> {
         return Err("Konnte die App nicht als Administrator starten. Bitte manuell als Administrator ausführen.".to_string());
     }
 
-    app.exit(0);
-    Ok(())
+    std::process::exit(0);
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -410,8 +409,22 @@ pub async fn get_stats(
 }
 
 #[tauri::command]
-pub async fn quit_app(app: tauri::AppHandle) {
-    app.exit(0);
+pub async fn quit_app(_app: tauri::AppHandle) {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        use crate::tunnel_daemon;
+        use tokio::io::AsyncWriteExt;
+        #[cfg(target_os = "macos")]
+        let stream_res = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH).await;
+        #[cfg(target_os = "windows")]
+        let stream_res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
+        
+        if let Ok(mut stream) = stream_res {
+            let _ = stream.write_all(b"SHUTDOWN\n").await;
+            let _ = stream.flush().await;
+        }
+    }
+    std::process::exit(0);
 }
 
 #[tauri::command]

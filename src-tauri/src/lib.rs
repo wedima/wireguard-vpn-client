@@ -66,7 +66,22 @@ pub fn run() {
                         }
                     }
                     "quit" => {
-                        app.exit(0);
+                        let _ = tauri::async_runtime::block_on(async {
+                            #[cfg(any(target_os = "macos", target_os = "windows"))]
+                            {
+                                use tokio::io::AsyncWriteExt;
+                                #[cfg(target_os = "macos")]
+                                let stream_res = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH).await;
+                                #[cfg(target_os = "windows")]
+                                let stream_res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
+                                
+                                if let Ok(mut stream) = stream_res {
+                                    let _ = stream.write_all(b"SHUTDOWN\n").await;
+                                    let _ = stream.flush().await;
+                                }
+                            }
+                        });
+                        std::process::exit(0);
                     }
                     _ => {}
                 })
