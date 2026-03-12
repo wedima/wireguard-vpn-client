@@ -1,4 +1,6 @@
 use std::net::{SocketAddr, ToSocketAddrs};
+#[cfg(target_os = "macos")]
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +12,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(target_os = "macos")]
 use tokio::io::unix::AsyncFd;
 #[cfg(target_os = "macos")]
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
 
 #[cfg(target_os = "windows")]
 use tokio::net::windows::named_pipe::NamedPipeServer;
@@ -543,7 +545,7 @@ async fn handle_client<R, W>(
     bytes_rx.store(0, Ordering::Relaxed);
 
     match run_tunnel(config_str, &mut writer, bytes_tx, bytes_rx).await {
-        Ok((iface, stop_tx, allowed_ips, dns, _ipv6_ks)) => {
+        Ok((iface, stop_tx, allowed_ips, dns, ipv6_ks)) => {
             let mut stop_line = String::new();
             reader.read_line(&mut stop_line).await.ok();
             let _ = stop_tx.send(());
@@ -551,7 +553,7 @@ async fn handle_client<R, W>(
             #[cfg(target_os = "macos")]
             teardown_routing(&iface, &allowed_ips, &dns, ipv6_ks);
             #[cfg(target_os = "windows")]
-            let _ = crate::wireguard::remove_routes(&iface, &allowed_ips, &dns);
+            let _ = (ipv6_ks, crate::wireguard::remove_routes(&iface, &allowed_ips, &dns));
             let _ = writer.write_all(b"DISCONNECTED\n").await;
         }
         Err(e) => {
@@ -627,7 +629,9 @@ where
         (a.to_string(), p.parse::<u8>().unwrap_or(128))
     });
 
-    let _has_ipv6_tunnel = iface_addr6.is_some();
+    let has_ipv6_tunnel = iface_addr6.is_some();
+    #[cfg(target_os = "windows")]
+    let _ = has_ipv6_tunnel;
 
     #[cfg(target_os = "macos")]
     {
