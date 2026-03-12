@@ -6,7 +6,7 @@ mod wg_tunnel;
 #[cfg(not(target_os = "macos"))]
 mod wireguard;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod tunnel_daemon;
 
 use commands::AppState;
@@ -37,7 +37,7 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show_item, &sep, &quit_item])?;
 
             let tray_icon = {
-                let bytes = include_bytes!("../icons/tray_icon_22.png");
+                let bytes = include_bytes!("../icons/32x32.png");
                 let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
                     .expect("decode tray icon");
                 let rgba = img.to_rgba8();

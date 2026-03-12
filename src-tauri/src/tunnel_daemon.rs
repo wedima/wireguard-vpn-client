@@ -1,38 +1,72 @@
-#![cfg(target_os = "macos")]
-
-use std::ffi::CStr;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+use std::ffi::CStr;
+#[cfg(target_os = "macos")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "macos")]
+use tokio::io::unix::AsyncFd;
+#[cfg(target_os = "macos")]
+use tokio::net::{UnixListener, UnixStream};
+
+#[cfg(target_os = "windows")]
+use tokio::net::windows::named_pipe::NamedPipeServer;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Security::{
+    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
+    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Pipes::{
+    CreateNamedPipeW,
+    PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX};
+
+#[cfg(target_os = "windows")]
+const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use boringtun::noise::{Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::io::unix::AsyncFd;
-use tokio::net::{UnixListener, UnixStream, UdpSocket};
+use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::interval;
 
 const MAX_PACKET: usize = 65536;
+
+#[cfg(target_os = "macos")]
 pub const SOCKET_PATH: &str = "/var/run/com.wedima.vpn.wg.helper.sock";
+#[cfg(target_os = "windows")]
+pub const PIPE_NAME: &str = r"\\.\pipe\com.wedima.vpn.wg.helper";
+
 pub const HELPER_LABEL: &str = "com.wedima.vpn.wg.helper";
+#[cfg(target_os = "macos")]
 pub const HELPER_DEST: &str = "/Library/PrivilegedHelperTools/com.wedima.vpn.wg.helper";
+#[cfg(target_os = "macos")]
 pub const PLIST_DEST: &str = "/Library/LaunchDaemons/com.wedima.vpn.wg.helper.plist";
 
+#[cfg(target_os = "macos")]
 const UTUN_CONTROL_NAME: &[u8] = b"com.apple.net.utun_control\0";
+#[cfg(target_os = "macos")]
 const UTUN_OPT_IFNAME: libc::c_int = 2;
+#[cfg(target_os = "macos")]
 const CTLIOCGINFO: libc::c_ulong = 0xc064_4e03;
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 struct CtlInfo {
     ctl_id: u32,
     ctl_name: [u8; 96],
 }
 
+#[cfg(target_os = "macos")]
 fn create_utun_fd() -> Result<(i32, String), String> {
     unsafe {
         let fd = libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL);
@@ -86,6 +120,7 @@ fn create_utun_fd() -> Result<(i32, String), String> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn configure_interface(iface: &str, addr4: &str, mtu: u32, addr6: Option<(&str, u8)>) {
     let _ = std::process::Command::new("ifconfig")
         .args([iface, "inet", addr4, addr4, "up"])
@@ -100,6 +135,7 @@ fn configure_interface(iface: &str, addr4: &str, mtu: u32, addr6: Option<(&str, 
     }
 }
 
+#[cfg(target_os = "macos")]
 fn default_gateway() -> Option<String> {
     let out = std::process::Command::new("route")
         .args(["-n", "get", "default"])
@@ -112,6 +148,7 @@ fn default_gateway() -> Option<String> {
         .map(str::to_string)
 }
 
+#[cfg(target_os = "macos")]
 fn default_gateway_v6() -> Option<String> {
     let out = std::process::Command::new("route")
         .args(["-n", "get", "-inet6", "default"])
@@ -124,6 +161,7 @@ fn default_gateway_v6() -> Option<String> {
         .map(str::to_string)
 }
 
+#[cfg(target_os = "macos")]
 fn network_services() -> Vec<String> {
     let out = std::process::Command::new("networksetup")
         .arg("-listallnetworkservices")
@@ -140,6 +178,7 @@ fn network_services() -> Vec<String> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn disable_ipv6() {
     for svc in network_services() {
         let _ = std::process::Command::new("networksetup")
@@ -148,6 +187,7 @@ fn disable_ipv6() {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn enable_ipv6() {
     for svc in network_services() {
         let _ = std::process::Command::new("networksetup")
@@ -156,6 +196,7 @@ fn enable_ipv6() {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn setup_routing(iface: &str, peer_ip: &str, allowed_ips: &[String], has_ipv6_tunnel: bool) -> bool {
     if let Some(gw) = default_gateway() {
         let _ = std::process::Command::new("route")
@@ -210,6 +251,7 @@ fn setup_routing(iface: &str, peer_ip: &str, allowed_ips: &[String], has_ipv6_tu
     ipv6_kill_switched
 }
 
+#[cfg(target_os = "macos")]
 fn setup_dns(dns: &[String]) {
     let all: Vec<&str> = dns.iter().map(|s| s.as_str()).collect();
     if all.is_empty() {
@@ -223,6 +265,7 @@ fn setup_dns(dns: &[String]) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn teardown_routing(iface: &str, allowed_ips: &[String], dns: &[String], ipv6_kill_switched: bool) {
     for cidr in allowed_ips.iter().filter(|c| !c.contains(':')) {
         if cidr == "0.0.0.0/0" || cidr == "0/0" {
@@ -264,6 +307,78 @@ fn teardown_routing(iface: &str, allowed_ips: &[String], dns: &[String], ipv6_ki
     }
 }
 
+#[cfg(target_os = "windows")]
+use windows_service::{
+    define_windows_service,
+    service::{
+        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        ServiceType,
+    },
+    service_control_handler::{self, ServiceControlHandlerResult},
+    service_dispatcher,
+};
+
+#[cfg(target_os = "windows")]
+define_windows_service!(ffi_service_main, windows_service_main);
+
+#[cfg(target_os = "windows")]
+pub fn run_as_service() -> Result<(), windows_service::Error> {
+    service_dispatcher::start(HELPER_LABEL, ffi_service_main)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_service_main(_arguments: Vec<std::ffi::OsString>) {
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+    
+    let event_handler = move |control_event| -> ServiceControlHandlerResult {
+        match control_event {
+            ServiceControl::Stop => {
+                let _ = shutdown_tx.send(());
+                ServiceControlHandlerResult::NoError
+            }
+            _ => ServiceControlHandlerResult::NotImplemented,
+        }
+    };
+
+    let status_handle = service_control_handler::register(HELPER_LABEL, event_handler).expect("register service control handler");
+
+    status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    }).expect("set service status");
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    rt.block_on(async {
+        tokio::select! {
+            _ = daemon_loop() => {},
+            _ = async {
+                while shutdown_rx.try_recv().is_err() {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } => {},
+        }
+    });
+
+    status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    }).expect("set service status stopped");
+}
+
 pub fn run_daemon() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -272,6 +387,7 @@ pub fn run_daemon() {
     rt.block_on(daemon_loop());
 }
 
+#[cfg(target_os = "macos")]
 async fn daemon_loop() {
     let _ = std::fs::remove_file(SOCKET_PATH);
     let listener = UnixListener::bind(SOCKET_PATH).expect("bind helper socket");
@@ -290,16 +406,102 @@ async fn daemon_loop() {
             let btx = Arc::clone(&bytes_tx);
             let brx = Arc::clone(&bytes_rx);
             tokio::spawn(async move {
-                handle_client(stream, btx, brx).await;
+                let (reader, writer) = stream.into_split();
+                handle_client(BufReader::new(reader), writer, btx, brx).await;
             });
         }
     }
 }
 
-async fn handle_client(stream: UnixStream, bytes_tx: Arc<AtomicU64>, bytes_rx: Arc<AtomicU64>) {
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+#[cfg(target_os = "windows")]
+fn create_wide_open_pipe(pipe_name: &str, first: bool) -> Result<NamedPipeServer, String> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide_name: Vec<u16> = std::ffi::OsStr::new(pipe_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
 
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let mut sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
+
+    unsafe {
+        if InitializeSecurityDescriptor(
+            &mut sd as *mut _ as PSECURITY_DESCRIPTOR,
+            SECURITY_DESCRIPTOR_REVISION,
+        ) == 0
+        {
+            return Err("InitializeSecurityDescriptor failed".into());
+        }
+
+        // Set NULL DACL (allows everyone access)
+        if SetSecurityDescriptorDacl(&mut sd as *mut _ as PSECURITY_DESCRIPTOR, 1, std::ptr::null(), 0) == 0 {
+            return Err("SetSecurityDescriptorDacl failed".into());
+        }
+
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.lpSecurityDescriptor = &mut sd as *mut _ as *mut _;
+        sa.bInheritHandle = 0;
+
+        let mut access = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
+        if first {
+            access |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+        }
+
+        let handle = CreateNamedPipeW(
+            wide_name.as_ptr(),
+            access,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            255,   // max instances
+            65536, // out buffer
+            65536, // in buffer
+            0,     // default timeout
+            &sa,
+        );
+
+        if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            return Err(format!("CreateNamedPipeW failed: {}", std::io::Error::last_os_error()));
+        }
+
+        Ok(NamedPipeServer::from_raw_handle(handle as *mut _).map_err(|e| e.to_string())?)
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn daemon_loop() {
+    let bytes_tx = Arc::new(AtomicU64::new(0));
+    let bytes_rx = Arc::new(AtomicU64::new(0));
+    let mut first = true;
+
+    loop {
+        let server = match create_wide_open_pipe(PIPE_NAME, first) {
+            Ok(s) => s,
+            Err(_e) => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        first = false;
+
+        if server.connect().await.is_ok() {
+            let btx = Arc::clone(&bytes_tx);
+            let brx = Arc::clone(&bytes_rx);
+            tokio::spawn(async move {
+                let (reader, writer) = tokio::io::split(server);
+                handle_client(BufReader::new(reader), writer, btx, brx).await;
+            });
+        }
+    }
+}
+
+async fn handle_client<R, W>(
+    mut reader: BufReader<R>,
+    mut writer: W,
+    bytes_tx: Arc<AtomicU64>,
+    bytes_rx: Arc<AtomicU64>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let mut line = String::new();
     if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
         return;
@@ -341,12 +543,15 @@ async fn handle_client(stream: UnixStream, bytes_tx: Arc<AtomicU64>, bytes_rx: A
     bytes_rx.store(0, Ordering::Relaxed);
 
     match run_tunnel(config_str, &mut writer, bytes_tx, bytes_rx).await {
-        Ok((iface, stop_tx, allowed_ips, dns, ipv6_ks)) => {
+        Ok((iface, stop_tx, allowed_ips, dns, _ipv6_ks)) => {
             let mut stop_line = String::new();
             reader.read_line(&mut stop_line).await.ok();
             let _ = stop_tx.send(());
             tokio::time::sleep(Duration::from_millis(200)).await;
+            #[cfg(target_os = "macos")]
             teardown_routing(&iface, &allowed_ips, &dns, ipv6_ks);
+            #[cfg(target_os = "windows")]
+            let _ = crate::wireguard::remove_routes(&iface, &allowed_ips, &dns);
             let _ = writer.write_all(b"DISCONNECTED\n").await;
         }
         Err(e) => {
@@ -357,9 +562,9 @@ async fn handle_client(stream: UnixStream, bytes_tx: Arc<AtomicU64>, bytes_rx: A
     }
 }
 
-async fn run_tunnel(
+async fn run_tunnel<W>(
     config_str: String,
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut W,
     bytes_tx: Arc<AtomicU64>,
     bytes_rx: Arc<AtomicU64>,
 ) -> Result<
@@ -371,7 +576,10 @@ async fn run_tunnel(
         bool,
     ),
     String,
-> {
+> 
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let config = crate::wg_config::parse(&config_str)?;
     let peer = config.peers.first().ok_or("No [Peer] in config")?;
 
@@ -384,9 +592,26 @@ async fn run_tunnel(
 
     let peer_ip = endpoint.ip().to_string();
 
+    #[cfg(target_os = "macos")]
     let (tun_fd, iface) = create_utun_fd()?;
+    #[cfg(target_os = "windows")]
+    let (device, iface) = {
+        let mut cfg = tun2::Configuration::default();
+        let wintun_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("wintun.dll")))
+            .unwrap_or_else(|| std::path::PathBuf::from("wintun.dll"));
+        cfg.platform_config(|p| {
+            p.wintun_file(&wintun_path);
+        });
+        let device = tun2::create_as_async(&cfg)
+            .map_err(|e| format!("Failed to create TUN device: {}", e))?;
+        use tun2::AbstractDevice;
+        let name = device.tun_name().map_err(|e: tun2::Error| e.to_string())?.to_string();
+        (device, name)
+    };
 
-    let (iface_addr, _prefix_len) = config
+    let (iface_addr, prefix_len) = config
         .interface
         .addresses
         .iter()
@@ -402,21 +627,45 @@ async fn run_tunnel(
         (a.to_string(), p.parse::<u8>().unwrap_or(128))
     });
 
-    let has_ipv6_tunnel = iface_addr6.is_some();
+    let _has_ipv6_tunnel = iface_addr6.is_some();
 
-    configure_interface(
-        &iface,
-        &iface_addr,
-        config.interface.mtu,
-        iface_addr6.as_ref().map(|(a, p)| (a.as_str(), *p)),
-    );
+    #[cfg(target_os = "macos")]
+    {
+        configure_interface(
+            &iface,
+            &iface_addr,
+            config.interface.mtu,
+            iface_addr6.as_ref().map(|(a, p)| (a.as_str(), *p)),
+        );
+    }
+    
+#[cfg(target_os = "macos")]
     let ipv6_ks = setup_routing(&iface, &peer_ip, &peer.allowed_ips, has_ipv6_tunnel);
+    #[cfg(target_os = "macos")]
     setup_dns(&config.interface.dns);
+    #[cfg(target_os = "windows")]
+    let ipv6_ks = false;
+    #[cfg(target_os = "windows")]
+    {
+        use crate::wireguard::{IfaceConfig, setup_routes};
+        let iface_cfg = IfaceConfig {
+            addr: &iface_addr,
+            prefix_len,
+            addr6: iface_addr6.as_ref().map(|(a, p)| (a.as_str(), *p)),
+            mtu: config.interface.mtu,
+        };
+        setup_routes(&iface, &iface_cfg, &peer.allowed_ips, &config.interface.dns, &peer_ip)?;
+    }
 
-    let owned_fd = unsafe { OwnedFd::from_raw_fd(tun_fd) };
-    let async_fd = Arc::new(
-        AsyncFd::new(owned_fd).map_err(|e| format!("AsyncFd: {}", e))?,
-    );
+    #[cfg(target_os = "macos")]
+    let async_fd = {
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(tun_fd) };
+        Arc::new(
+            AsyncFd::new(owned_fd).map_err(|e| format!("AsyncFd: {}", e))?,
+        )
+    };
+    #[cfg(target_os = "windows")]
+    let (tun_reader, tun_writer) = tokio::io::split(device);
 
     let private_key = StaticSecret::from(config.interface.private_key);
     let peer_pub = PublicKey::from(peer.public_key);
@@ -438,22 +687,47 @@ async fn run_tunnel(
     let tunn = Arc::new(Mutex::new(tunn));
     let (stop_tx, _) = broadcast::channel::<()>(4);
 
+    #[cfg(target_os = "macos")]
     {
-        let tun = Arc::clone(&async_fd);
-        let u = Arc::clone(&udp);
-        let t = Arc::clone(&tunn);
-        let btx = Arc::clone(&bytes_tx);
-        let mut rx = stop_tx.subscribe();
-        tokio::spawn(async move { task_tun_to_udp(tun, u, t, btx, &mut rx).await });
+        {
+            let tun = Arc::clone(&async_fd);
+            let u = Arc::clone(&udp);
+            let t = Arc::clone(&tunn);
+            let btx = Arc::clone(&bytes_tx);
+            let mut rx = stop_tx.subscribe();
+            tokio::spawn(async move { task_tun_to_udp(tun, u, t, btx, &mut rx).await });
+        }
+        {
+            let tun = Arc::clone(&async_fd);
+            let u = Arc::clone(&udp);
+            let t = Arc::clone(&tunn);
+            let brx = Arc::clone(&bytes_rx);
+            let mut rx = stop_tx.subscribe();
+            tokio::spawn(async move { task_udp_to_tun(tun, u, t, brx, &mut rx).await });
+        }
     }
+    #[cfg(target_os = "windows")]
     {
-        let tun = Arc::clone(&async_fd);
-        let u = Arc::clone(&udp);
-        let t = Arc::clone(&tunn);
-        let brx = Arc::clone(&bytes_rx);
-        let mut rx = stop_tx.subscribe();
-        tokio::spawn(async move { task_udp_to_tun(tun, u, t, brx, &mut rx).await });
+        {
+            let u = Arc::clone(&udp);
+            let t = Arc::clone(&tunn);
+            let btx = Arc::clone(&bytes_tx);
+            let mut rx = stop_tx.subscribe();
+            tokio::spawn(async move {
+                crate::wg_tunnel::task_tun_to_udp(tun_reader, u, t, btx, &mut rx).await;
+            });
+        }
+        {
+            let u = Arc::clone(&udp);
+            let t = Arc::clone(&tunn);
+            let brx = Arc::clone(&bytes_rx);
+            let mut rx = stop_tx.subscribe();
+            tokio::spawn(async move {
+                crate::wg_tunnel::task_udp_to_tun(tun_writer, u, t, brx, &mut rx).await;
+            });
+        }
     }
+
     {
         let u = Arc::clone(&udp);
         let t = Arc::clone(&tunn);
@@ -476,6 +750,7 @@ async fn run_tunnel(
     ))
 }
 
+#[cfg(target_os = "macos")]
 async fn tun_read(fd: &AsyncFd<OwnedFd>, buf: &mut [u8]) -> std::io::Result<usize> {
     loop {
         let mut guard = fd.readable().await?;
@@ -499,6 +774,7 @@ async fn tun_read(fd: &AsyncFd<OwnedFd>, buf: &mut [u8]) -> std::io::Result<usiz
     }
 }
 
+#[cfg(target_os = "macos")]
 fn tun_write_sync(fd: &OwnedFd, buf: &[u8]) -> std::io::Result<()> {
     let n = unsafe {
         libc::write(fd.as_raw_fd(), buf.as_ptr() as *const libc::c_void, buf.len())
@@ -510,6 +786,7 @@ fn tun_write_sync(fd: &OwnedFd, buf: &[u8]) -> std::io::Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
 async fn task_tun_to_udp(
     tun: Arc<AsyncFd<OwnedFd>>,
     udp: Arc<UdpSocket>,
@@ -542,6 +819,7 @@ async fn task_tun_to_udp(
     }
 }
 
+#[cfg(target_os = "macos")]
 async fn task_udp_to_tun(
     tun: Arc<AsyncFd<OwnedFd>>,
     udp: Arc<UdpSocket>,
@@ -619,11 +897,29 @@ async fn task_timers(
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn is_installed() -> bool {
     std::path::Path::new(HELPER_DEST).exists()
         && std::path::Path::new(PLIST_DEST).exists()
 }
 
+#[cfg(target_os = "windows")]
+pub fn is_installed() -> bool {
+    let out = std::process::Command::new("sc")
+        .args(["query", HELPER_LABEL])
+        .output();
+    
+    match out {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            // Check if service exists AND is running
+            o.status.success() && s.contains("STATE") && s.contains("RUNNING")
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub fn install(current_exe: &str) -> Result<(), String> {
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -682,4 +978,48 @@ pub fn install(current_exe: &str) -> Result<(), String> {
             String::from_utf8_lossy(&out.stderr)
         ))
     }
+}
+
+#[cfg(target_os = "windows")]
+pub fn install(current_exe: &str) -> Result<(), String> {
+    // Use PowerShell for a more robust installation script
+    let script = format!(
+        "$label = '{label}'; \
+         $exe = '{exe}'; \
+         if (Get-Service $label -ErrorAction SilentlyContinue) {{ \
+             Stop-Service $label -ErrorAction SilentlyContinue; \
+             sc.exe delete $label; \
+             Start-Sleep -Seconds 1; \
+         }} \
+         sc.exe create $label binPath= \"\\\"$exe\\\"\" start= auto displayname= 'Wedima VPN Helper'; \
+         sc.exe description $label 'Privileged helper for Wedima VPN WireGuard tunnel.'; \
+         Start-Service $label",
+        label = HELPER_LABEL,
+        exe = current_exe
+    );
+    
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = "powershell\0".encode_utf16().collect();
+    let params: Vec<u16> = format!("-NoProfile -NonInteractive -Command \"{}\"", script).encode_utf16().chain(Some(0u16)).collect();
+
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            params.as_ptr(),
+            std::ptr::null(),
+            SW_HIDE as i32,
+        )
+    };
+
+    if result as isize <= 32 {
+        return Err("Failed to install service with administrator privileges.".to_string());
+    }
+
+    std::thread::sleep(Duration::from_secs(3));
+    Ok(())
 }

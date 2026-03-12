@@ -24,6 +24,12 @@ pub struct WgConfig {
     pub name: Option<String>,
 }
 
+pub fn cidr_to_netmask(prefix_len: u8) -> String {
+    let bits: u32 = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
+    let [a, b, c, d] = bits.to_be_bytes();
+    format!("{}.{}.{}.{}", a, b, c, d)
+}
+
 fn decode_key(s: &str) -> Result<[u8; 32], String> {
     let bytes = STANDARD
         .decode(s.trim())

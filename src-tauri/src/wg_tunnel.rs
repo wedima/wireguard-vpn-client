@@ -75,9 +75,15 @@ impl WgSession {
             return Err("No IPv4 address in [Interface] section".to_string());
         };
 
+        let iface_addr6 = config.interface.addresses.iter().find(|a| a.contains(':')).map(|cidr| {
+            let (a, p) = cidr.split_once('/').unwrap_or((cidr, "128"));
+            (a.to_string(), p.parse::<u8>().unwrap_or(128))
+        });
+
         let iface_cfg = IfaceConfig {
             addr: &iface_addr,
             prefix_len,
+            addr6: iface_addr6.as_ref().map(|(a, p)| (a.as_str(), *p)),
             mtu: config.interface.mtu,
         };
 
@@ -145,7 +151,17 @@ fn create_tun_device() -> Result<(tun2::AsyncDevice, String), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let cfg = tun2::Configuration::default();
+        let mut cfg = tun2::Configuration::default();
+        #[cfg(target_os = "windows")]
+        {
+            let wintun_path = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("wintun.dll")))
+                .unwrap_or_else(|| std::path::PathBuf::from("wintun.dll"));
+            cfg.platform_config(|p| {
+                p.wintun_file(&wintun_path);
+            });
+        }
         let device = tun2::create_as_async(&cfg)
             .map_err(|e| format!("Failed to create TUN device: {}", e))?;
         use tun2::AbstractDevice;
@@ -259,7 +275,7 @@ mod macos_utun {
     }
 }
 
-async fn task_tun_to_udp(
+pub async fn task_tun_to_udp(
     mut reader: tokio::io::ReadHalf<tun2::AsyncDevice>,
     udp: Arc<UdpSocket>,
     tunn: Arc<Mutex<Tunn>>,
@@ -275,10 +291,10 @@ async fn task_tun_to_udp(
             _ = stop.recv() => break,
             n = reader.read(&mut pkt) => {
                 let n = match n { Ok(0) | Err(_) => break, Ok(n) => n };
-                if n <= 4 { continue; }
-                let payload_len = n - 4;
+                if n == 0 { continue; }
+                let payload_len = n;
                 let mut g = tunn.lock().await;
-                match g.encapsulate(&pkt[4..n], &mut enc) {
+                match g.encapsulate(&pkt[..n], &mut enc) {
                     TunnResult::WriteToNetwork(data) => {
                         let data = data.to_vec();
                         drop(g);
@@ -292,7 +308,7 @@ async fn task_tun_to_udp(
     }
 }
 
-async fn task_udp_to_tun(
+pub async fn task_udp_to_tun(
     mut writer: tokio::io::WriteHalf<tun2::AsyncDevice>,
     udp: Arc<UdpSocket>,
     tunn: Arc<Mutex<Tunn>>,
@@ -316,17 +332,13 @@ async fn task_udp_to_tun(
                 loop {
                     match result {
                         TunnResult::WriteToTunnelV4(data, _) => {
-                            let mut buf = vec![0u8, 0, 0, libc::AF_INET as u8];
-                            buf.extend_from_slice(data);
                             bytes_rx.fetch_add(data.len() as u64, Ordering::Relaxed);
-                            let _ = writer.write_all(&buf).await;
+                            let _ = writer.write_all(data).await;
                             break;
                         }
                         TunnResult::WriteToTunnelV6(data, _) => {
-                            let mut buf = vec![0u8, 0, 0, libc::AF_INET6 as u8];
-                            buf.extend_from_slice(data);
                             bytes_rx.fetch_add(data.len() as u64, Ordering::Relaxed);
-                            let _ = writer.write_all(&buf).await;
+                            let _ = writer.write_all(data).await;
                             break;
                         }
                         TunnResult::WriteToNetwork(data) => {

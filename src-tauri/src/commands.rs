@@ -4,28 +4,67 @@ use tauri::Manager;
 
 use crate::crypto;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn is_elevated() -> bool {
+    use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
+    unsafe { IsUserAnAdmin() != 0 }
+}
+
+#[cfg(target_os = "windows")]
+fn relaunch_as_admin(app: &tauri::AppHandle) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_wide: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0u16)).collect();
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            exe_wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL as i32,
+        )
+    };
+
+    if result as isize <= 32 {
+        return Err("Konnte die App nicht als Administrator starten. Bitte manuell als Administrator ausführen.".to_string());
+    }
+
+    app.exit(0);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use std::sync::atomic::Ordering;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use crate::wg_tunnel::WgSession;
 
 pub struct AppState {
     pub pending_config: Mutex<Option<Vec<u8>>>,
-    #[cfg(not(target_os = "macos"))]
-    pub session: tokio::sync::Mutex<Option<WgSession>>,
     #[cfg(target_os = "macos")]
     pub daemon_stream: tokio::sync::Mutex<Option<tokio::net::UnixStream>>,
+    #[cfg(target_os = "windows")]
+    pub daemon_stream: tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeClient>>,
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    pub session: tokio::sync::Mutex<Option<WgSession>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             pending_config: Mutex::new(None),
-            #[cfg(not(target_os = "macos"))]
-            session: tokio::sync::Mutex::new(None),
             #[cfg(target_os = "macos")]
             daemon_stream: tokio::sync::Mutex::new(None),
+            #[cfg(target_os = "windows")]
+            daemon_stream: tokio::sync::Mutex::new(None),
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            session: tokio::sync::Mutex::new(None),
         }
     }
 }
@@ -86,9 +125,9 @@ pub async fn check_status(
 ) -> Result<StatusResult, String> {
     let stored = read_state(&app);
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let is_connected = state.daemon_stream.lock().await.is_some();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let is_connected = state.session.lock().await.is_some();
 
     let has_config = if stored.has_config && stored.has_password {
@@ -185,7 +224,7 @@ pub async fn connect(
     let conf_str =
         String::from_utf8(plaintext).map_err(|_| "Config content is invalid UTF-8.")?;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         use crate::tunnel_daemon;
         use base64::engine::general_purpose::STANDARD as B64;
@@ -203,27 +242,41 @@ pub async fn connect(
 
         let config_b64 = B64.encode(conf_str.as_bytes());
 
-        let stream = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH)
-            .await
-            .map_err(|e| format!("Cannot reach helper daemon: {}. Try restarting the app.", e))?;
+        #[cfg(target_os = "macos")]
+        let stream_res = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH).await;
+        #[cfg(target_os = "windows")]
+        let stream_res = {
+            let mut res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
+            if res.is_err() {
+                for _ in 0..10 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
+                    if res.is_ok() { break; }
+                }
+            }
+            res
+        };
 
-        let (reader, mut writer) = stream.into_split();
-        let mut buf_reader = BufReader::new(reader);
+        let stream = stream_res.map_err(|e| format!("Cannot reach helper daemon: {}. Try restarting the app.", e))?;
+        let mut stream = stream;
 
-        writer
+        stream
             .write_all(format!("START {}\n", config_b64).as_bytes())
             .await
             .map_err(|e| e.to_string())?;
-        writer.flush().await.ok();
+        stream.flush().await.ok();
 
         let mut response = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            buf_reader.read_line(&mut response),
-        )
-        .await
-        .map_err(|_| "Daemon did not respond in time.".to_string())?
-        .map_err(|e| e.to_string())?;
+        {
+            let mut buf_reader = BufReader::new(&mut stream);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                buf_reader.read_line(&mut response),
+            )
+            .await
+            .map_err(|_| "Daemon did not respond in time.".to_string())?
+            .map_err(|e| e.to_string())?;
+        }
 
         let response = response.trim().to_string();
 
@@ -234,15 +287,10 @@ pub async fn connect(
             return Err(format!("Unexpected daemon response: {}", response));
         }
 
-        let read_half = buf_reader.into_inner();
-        let stream = read_half
-            .reunite(writer)
-            .map_err(|_| "Failed to reunite stream halves".to_string())?;
-
         *state.daemon_stream.lock().await = Some(stream);
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         use crate::wg_tunnel::WgSession;
         let session = WgSession::start(&conf_str).await?;
@@ -254,7 +302,7 @@ pub async fn connect(
 
 #[tauri::command]
 pub async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         use tokio::io::AsyncWriteExt;
 
@@ -267,7 +315,7 @@ pub async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String>
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let session = state
             .session
@@ -303,7 +351,7 @@ pub async fn get_stats(
 ) -> Result<StatsResult, String> {
     let connection_name = read_state(&app).connection_name;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         use crate::tunnel_daemon;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -313,9 +361,23 @@ pub async fn get_stats(
             return Ok(StatsResult { bytes_tx: 0, bytes_rx: 0, connection_name });
         }
 
-        let mut stream = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH)
-            .await
-            .map_err(|e| format!("Stats connect: {}", e))?;
+        #[cfg(target_os = "macos")]
+        let stream_res = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH).await;
+        #[cfg(target_os = "windows")]
+        let stream_res = {
+            let mut res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
+            if res.is_err() {
+                for _ in 0..10 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
+                    if res.is_ok() { break; }
+                }
+            }
+            res
+        };
+
+        let mut stream = stream_res.map_err(|e| format!("Stats connect: {}", e))?;
+        
         stream.write_all(b"STATS\n").await.map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; 64];
         let n = tokio::time::timeout(
@@ -332,7 +394,7 @@ pub async fn get_stats(
         return Ok(StatsResult { bytes_tx: tx, bytes_rx: rx, connection_name });
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let session = state.session.lock().await;
         let (tx, rx) = if let Some(s) = session.as_ref() {
@@ -376,5 +438,40 @@ pub async fn uninstall_helper() -> Result<(), String> {
             return Err(String::from_utf8_lossy(&out.stderr).to_string());
         }
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        use crate::tunnel_daemon;
+        let script = format!(
+            "if (Get-Service {label} -ErrorAction SilentlyContinue) {{ \
+                 Stop-Service {label} -ErrorAction SilentlyContinue; \
+                 sc.exe delete {label} \
+             }}",
+            label = tunnel_daemon::HELPER_LABEL
+        );
+        
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+        let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+        let file: Vec<u16> = "powershell\0".encode_utf16().collect();
+        let params: Vec<u16> = format!("-NoProfile -NonInteractive -Command \"{}\"", script).encode_utf16().chain(Some(0u16)).collect();
+
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                params.as_ptr(),
+                std::ptr::null(),
+                SW_HIDE as i32,
+            )
+        };
+
+        if result as isize <= 32 {
+            return Err("Failed to uninstall service with administrator privileges.".to_string());
+        }
+    }
+
     Ok(())
 }

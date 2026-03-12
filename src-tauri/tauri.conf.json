@@ -36,6 +36,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "wintun.dll": "wintun.dll"
+    },
     "macOS": {
       "entitlements": "entitlements.plist",
       "infoPlist": "Info.plist"
