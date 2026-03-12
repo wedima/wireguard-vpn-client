@@ -26,6 +26,13 @@ use cocoa::{
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .manage(AppState::new())
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -59,7 +66,7 @@ pub fn run() {
                         }
                     }
                     "quit" => {
-                        std::process::exit(0);
+                        app.exit(0);
                     }
                     _ => {}
                 })

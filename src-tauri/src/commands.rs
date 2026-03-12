@@ -35,7 +35,8 @@ fn relaunch_as_admin(app: &tauri::AppHandle) -> Result<(), String> {
         return Err("Konnte die App nicht als Administrator starten. Bitte manuell als Administrator ausführen.".to_string());
     }
 
-    std::process::exit(0);
+    app.exit(0);
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -409,8 +410,8 @@ pub async fn get_stats(
 }
 
 #[tauri::command]
-pub async fn quit_app(_app: tauri::AppHandle) {
-    std::process::exit(0);
+pub async fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
