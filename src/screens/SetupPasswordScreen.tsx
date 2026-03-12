@@ -55,7 +55,7 @@ export default function SetupPasswordScreen({ onPasswordSet }: Props) {
         </p>
 
         <div className="mb-4">
-          <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-text-muted">
+          <label className="mb-2 block text-xs font-medium tracking-wider text-text-muted">
             {t("setupPassword.newPassword")}
           </label>
           <div className="relative">
@@ -76,7 +76,7 @@ export default function SetupPasswordScreen({ onPasswordSet }: Props) {
         </div>
 
         <div className="mb-6">
-          <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-text-muted">
+          <label className="mb-2 block text-xs font-medium tracking-wider text-text-muted">
             {t("setupPassword.confirmPassword")}
           </label>
           <input

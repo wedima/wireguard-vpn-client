@@ -115,11 +115,15 @@ pnpm run tauri build
 
 ## Creating Encrypted Config Files (Admin)
 
-Use the included Python script to encrypt a WireGuard config for distribution:
+Use one of the included admin scripts to encrypt a WireGuard config for distribution:
 
 ```bash
-pip install cryptography argon2-cffi
-python3 encrypt-config.py wg0.conf wg0.enc
+python3 -m pip install cryptography argon2-cffi
+python3 scripts/encrypt-config.py wg0.conf wg0.enc
+
+# or Node.js version
+pnpm add argon2
+node scripts/encrypt-config.mjs wg0.conf wg0.enc
 ```
 
 The script prompts for a password and produces a `.enc` file to distribute to users. Alternatively, a plain `.conf` file can be imported directly — the app will detect it automatically.
@@ -171,7 +175,9 @@ wedima-vpn-wg/
 │       ├── commands.rs             # All Tauri IPC commands
 │       ├── lib.rs                  # App setup + system tray
 │       └── main.rs
-├── encrypt-config.py               # Admin tool to create .enc files
+├── scripts/
+│   ├── encrypt-config.py           # Admin Python tool to create .enc files
+│   └── encrypt-config.mjs          # Admin Node.js tool to create .enc files
 ├── .gitignore
 └── README.md
 ```

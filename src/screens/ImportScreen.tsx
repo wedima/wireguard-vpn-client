@@ -100,7 +100,7 @@ export default function ImportScreen({ onImported }: Props) {
         </p>
 
         <div className="mb-5">
-          <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-text-muted">
+          <label className="mb-2 block text-xs font-medium tracking-wider text-text-muted">
             {t("import.configFileLabel")}
           </label>
 
@@ -156,7 +156,7 @@ export default function ImportScreen({ onImported }: Props) {
 
         {fileType === "encrypted" && (
           <div className="mb-6">
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-text-muted">
+            <label className="mb-2 block text-xs font-medium tracking-wider text-text-muted">
               {t("import.decryptionPassword")}
             </label>
             <div className="relative">
