@@ -353,7 +353,7 @@ pub async fn get_stats(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         use crate::tunnel_daemon;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
         let is_connected = state.daemon_stream.lock().await.is_some();
         if !is_connected {
@@ -376,18 +376,23 @@ pub async fn get_stats(
         };
 
         let mut stream = stream_res.map_err(|e| format!("Stats connect: {}", e))?;
-        
+
         stream.write_all(b"STATS\n").await.map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; 64];
-        let n = tokio::time::timeout(
+        stream.flush().await.map_err(|e| e.to_string())?;
+
+        let mut line = String::new();
+        tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            stream.read(&mut buf),
+            async {
+                let mut reader = BufReader::new(&mut stream);
+                reader.read_line(&mut line).await
+            },
         )
         .await
         .map_err(|_| "Stats timeout".to_string())?
         .map_err(|e| e.to_string())?;
-        let s = String::from_utf8_lossy(&buf[..n]);
-        let mut parts = s.split_whitespace();
+
+        let mut parts = line.split_whitespace();
         let tx = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
         let rx = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
         return Ok(StatsResult { bytes_tx: tx, bytes_rx: rx, connection_name });

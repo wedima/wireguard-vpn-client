@@ -1,8 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Eye, EyeOff, Loader2, Settings2, Wifi, WifiOff,
-  Trash2, Wrench, ArrowUp, ArrowDown, LogOut,
+  Trash2, Wrench, LogOut,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import wedimaLogo from "../assets/wedima-logo.svg";
@@ -13,7 +13,6 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Card, CardContent } from "../components/ui/card";
-import { Separator } from "../components/ui/separator";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,11 +43,23 @@ interface Stats {
   connection_name: string | null;
 }
 
+interface TrafficPoint {
+  timestamp: number;
+  txRate: number;
+  rxRate: number;
+  bytesTx: number;
+  bytesRx: number;
+}
+
 function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatRate(bytesPerSecond: number): string {
+  return `${formatBytes(bytesPerSecond)}/s`;
 }
 
 export default function ConnectScreen({ isConnected, connectionName, onStatusChange, onReset }: Props) {
@@ -60,22 +71,111 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showUninstallConfirm, setShowUninstallConfirm] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [trafficHistory, setTrafficHistory] = useState<TrafficPoint[]>([]);
+  const [hoveredPointIndex, setHoveredPointIndex] = useState<number | null>(null);
+  const previousSampleRef = useRef<{ bytesTx: number; bytesRx: number; timestamp: number } | null>(null);
+  const chartRef = useRef<SVGSVGElement | null>(null);
 
   useEffect(() => {
     if (!isConnected) {
       setStats(null);
+      setTrafficHistory([]);
+      setHoveredPointIndex(null);
+      previousSampleRef.current = null;
       return;
     }
     const poll = async () => {
       try {
         const s = await invoke<Stats>("get_stats");
+        const now = Date.now();
+
+        // Read and write the ref OUTSIDE setState — React (StrictMode) calls
+        // state-updater callbacks twice to detect side effects, which would
+        // zero-out every delta if the ref were mutated inside setState.
+        const prev = previousSampleRef.current;
+        const elapsedSeconds = prev ? Math.max((now - prev.timestamp) / 1000, 0.5) : 1;
+        const txRate = prev ? Math.max((s.bytes_tx - prev.bytesTx) / elapsedSeconds, 0) : 0;
+        const rxRate = prev ? Math.max((s.bytes_rx - prev.bytesRx) / elapsedSeconds, 0) : 0;
+        previousSampleRef.current = { bytesTx: s.bytes_tx, bytesRx: s.bytes_rx, timestamp: now };
+
         setStats(s);
-      } catch {}
+        setTrafficHistory((history) => {
+          const nextPoint: TrafficPoint = {
+            timestamp: now,
+            txRate,
+            rxRate,
+            bytesTx: s.bytes_tx,
+            bytesRx: s.bytes_rx,
+          };
+          return [...history, nextPoint].slice(-40);
+        });
+      } catch (e) {
+        console.error("[get_stats]", e);
+      }
     };
     poll();
-    const id = setInterval(poll, 1000);
+    const id = setInterval(poll, 700);
     return () => clearInterval(id);
   }, [isConnected]);
+
+  const averagedRate = useMemo(() => {
+    if (trafficHistory.length === 0) {
+      return { txRate: 0, rxRate: 0 };
+    }
+
+    const sampleWindow = trafficHistory.slice(-6);
+    const txRate = sampleWindow.reduce((sum, point) => sum + point.txRate, 0) / sampleWindow.length;
+    const rxRate = sampleWindow.reduce((sum, point) => sum + point.rxRate, 0) / sampleWindow.length;
+    return { txRate, rxRate };
+  }, [trafficHistory]);
+
+  const activePoint = useMemo(() => {
+    if (trafficHistory.length === 0) return null;
+    if (hoveredPointIndex === null) return trafficHistory[trafficHistory.length - 1];
+    return trafficHistory[Math.min(hoveredPointIndex, trafficHistory.length - 1)] ?? null;
+  }, [hoveredPointIndex, trafficHistory]);
+
+  const chartGeometry = useMemo(() => {
+    if (trafficHistory.length === 0) {
+      return {
+        txAreaPath: "",
+        rxAreaPath: "",
+        txLinePath: "",
+        rxLinePath: "",
+        hoverX: null as number | null,
+      };
+    }
+
+    const maxRate = Math.max(
+      ...trafficHistory.map((point) => Math.max(point.txRate, point.rxRate)),
+      1
+    );
+    const totalPoints = trafficHistory.length;
+    const xAt = (index: number) => (totalPoints <= 1 ? 0 : (index / (totalPoints - 1)) * 100);
+    // Render 0-rate at y=96 (4 % above SVG bottom) so the baseline is always
+    // visible as a thin coloured strip even during idle periods.
+    const yAt = (value: number) => 96 - (value / maxRate) * 88;
+
+    const txPoints = trafficHistory.map((point, index) => `${xAt(index)},${yAt(point.txRate)}`);
+    const rxPoints = trafficHistory.map((point, index) => `${xAt(index)},${yAt(point.rxRate)}`);
+
+    const txAreaPath = `M 0,100 ${txPoints.join(" ")} L 100,100 Z`;
+    const rxAreaPath = `M 0,100 ${rxPoints.join(" ")} L 100,100 Z`;
+    const txLinePath = txPoints.length > 0 ? `M ${txPoints.join(" L ")}` : "";
+    const rxLinePath = rxPoints.length > 0 ? `M ${rxPoints.join(" L ")}` : "";
+    const hoverX = hoveredPointIndex === null ? null : xAt(hoveredPointIndex);
+
+    return { txAreaPath, rxAreaPath, txLinePath, rxLinePath, hoverX };
+  }, [hoveredPointIndex, trafficHistory]);
+
+  const setHoverFromClientX = (clientX: number) => {
+    if (!chartRef.current || trafficHistory.length === 0) return;
+    const rect = chartRef.current.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1);
+    const pointIndex = Math.round(ratio * (trafficHistory.length - 1));
+    setHoveredPointIndex(pointIndex);
+  };
 
   const handleConnect = async () => {
     if (!password) return setError(t("connect.errors.missingPassword"));
@@ -162,25 +262,8 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
       </header>
 
       <main className="flex flex-1 flex-col items-center justify-center px-6">
-        <div className="w-full max-w-xs">
+        <div className="w-full max-w-md">
           <div className="mb-8 flex flex-col items-center gap-3">
-            <div
-              className={`relative flex h-20 w-20 items-center justify-center rounded-full border-2 transition-all duration-500 ${
-                isConnected
-                  ? "border-primary bg-primary/10"
-                  : "border-border bg-card"
-              }`}
-            >
-              {isConnected && (
-                <span className="absolute inset-0 animate-ping rounded-full bg-primary/20" />
-              )}
-              {isConnected ? (
-                <Wifi className="h-9 w-9 text-primary" />
-              ) : (
-                <WifiOff className="h-9 w-9 text-muted-foreground" />
-              )}
-            </div>
-
             <div className="text-center">
               <div
                 className={`mb-1 flex items-center justify-center gap-1.5 text-sm font-semibold ${
@@ -194,26 +277,136 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
                 />
                 {isConnected ? t("connect.connected") : t("connect.disconnected")}
               </div>
-              {isConnected && stats ? (
-                <Card className="mt-2">
-                  <CardContent className="flex items-center gap-6 px-5 py-3">
-                    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <ArrowUp className="h-3 w-3 text-primary" />
-                      {formatBytes(stats.bytes_tx)}
-                    </span>
-                    <Separator orientation="vertical" className="h-4" />
-                    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <ArrowDown className="h-3 w-3 text-primary" />
-                      {formatBytes(stats.bytes_rx)}
-                    </span>
-                  </CardContent>
-                </Card>
-              ) : (
+              {!isConnected && (
                 <p className="text-xs text-muted-foreground">
-                  {isConnected ? t("connect.tunnelActive") : t("connect.enterPasswordToConnect")}
+                  {t("connect.enterPasswordToConnect")}
                 </p>
               )}
             </div>
+
+            {isConnected && (
+              <Card className="mt-2 w-full overflow-hidden border-primary/20 bg-card/80">
+                <CardContent className="p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <span className="text-xs font-medium text-muted-foreground">{t("connect.liveTraffic")}</span>
+                    <div className="flex items-center gap-4 text-[11px]">
+                      <span className="flex items-center gap-1.5 text-emerald-500">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                        {t("connect.uploadRate")}: {formatRate(hoveredPointIndex === null ? averagedRate.txRate : (activePoint?.txRate ?? 0))}
+                      </span>
+                      <span className="flex items-center gap-1.5 text-sky-400">
+                        <span className="h-2 w-2 rounded-full bg-sky-400" />
+                        {t("connect.downloadRate")}: {formatRate(hoveredPointIndex === null ? averagedRate.rxRate : (activePoint?.rxRate ?? 0))}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border/70 bg-background/40 p-2">
+                    <svg
+                      ref={chartRef}
+                      viewBox="0 0 100 100"
+                      preserveAspectRatio="none"
+                      className="h-40 w-full"
+                      onPointerMove={(event) => setHoverFromClientX(event.clientX)}
+                      onPointerEnter={(event) => setHoverFromClientX(event.clientX)}
+                      onPointerLeave={() => setHoveredPointIndex(null)}
+                    >
+                      <defs>
+                        <linearGradient id="upload-area" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#10b981" stopOpacity="0.38" />
+                          <stop offset="100%" stopColor="#10b981" stopOpacity="0.03" />
+                        </linearGradient>
+                        <linearGradient id="download-area" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.34" />
+                          <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.03" />
+                        </linearGradient>
+                      </defs>
+
+                      {[20, 40, 60, 80].map((gridY) => (
+                        <line
+                          key={gridY}
+                          x1="0"
+                          x2="100"
+                          y1={gridY}
+                          y2={gridY}
+                          stroke="hsl(var(--border))"
+                          strokeOpacity="0.3"
+                          strokeWidth="0.45"
+                        />
+                      ))}
+
+                      {chartGeometry.rxAreaPath && (
+                        <path d={chartGeometry.rxAreaPath} fill="url(#download-area)" />
+                      )}
+                      {chartGeometry.txAreaPath && (
+                        <path d={chartGeometry.txAreaPath} fill="url(#upload-area)" />
+                      )}
+
+                      {chartGeometry.rxLinePath && (
+                        <path
+                          d={chartGeometry.rxLinePath}
+                          fill="none"
+                          stroke="#38bdf8"
+                          strokeWidth="1.2"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      )}
+                      {chartGeometry.txLinePath && (
+                        <path
+                          d={chartGeometry.txLinePath}
+                          fill="none"
+                          stroke="#10b981"
+                          strokeWidth="1.2"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      )}
+
+                      {chartGeometry.hoverX !== null && (
+                        <line
+                          x1={chartGeometry.hoverX}
+                          x2={chartGeometry.hoverX}
+                          y1="0"
+                          y2="100"
+                          stroke="hsl(var(--foreground))"
+                          strokeOpacity="0.35"
+                          strokeDasharray="2 2"
+                          strokeWidth="0.7"
+                        />
+                      )}
+                    </svg>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                    <div className="rounded-md border border-border/70 bg-background/30 px-3 py-2">
+                      <div className="mb-1 flex items-center gap-2 text-muted-foreground">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                        {t("connect.totalUpload")}
+                      </div>
+                      <div className="font-semibold text-emerald-500">
+                        {formatBytes(activePoint?.bytesTx ?? stats?.bytes_tx ?? 0)}
+                      </div>
+                    </div>
+                    <div className="rounded-md border border-border/70 bg-background/30 px-3 py-2">
+                      <div className="mb-1 flex items-center gap-2 text-muted-foreground">
+                        <span className="h-2 w-2 rounded-full bg-sky-400" />
+                        {t("connect.totalDownload")}
+                      </div>
+                      <div className="font-semibold text-sky-400">
+                        {formatBytes(activePoint?.bytesRx ?? stats?.bytes_rx ?? 0)}
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {!isConnected && (
+              <div
+                className="relative flex h-20 w-20 items-center justify-center rounded-full border-2 border-border bg-card"
+              >
+                <WifiOff className="h-9 w-9 text-muted-foreground" />
+              </div>
+            )}
           </div>
 
           {!isConnected && (
