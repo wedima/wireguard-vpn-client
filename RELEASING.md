@@ -6,7 +6,7 @@
 - GitHub Actions auf dem Repository aktiviert
 - `pnpm` installiert
 
-> **Windows ARM64**: Der `windows-11-arm` Runner benötigt GitHub **Team oder Enterprise**. Bei Free/Pro-Plan den Runner in beiden Workflows auf `windows-latest` ändern und `rustup target add aarch64-pc-windows-msvc` ergänzen (Cross-Compilation, kann bei nativen Abhängigkeiten eingeschränkt sein).
+> **Windows ARM64**: Der Job baut nativ mit `aarch64-pc-windows-msvc` auf `windows-11-arm`. Schlägt der Runner fehl, werden macOS und Windows x64 trotzdem veröffentlicht; ARM64 lädt dann nichts hoch.
 
 ---
 
@@ -88,6 +88,16 @@ Output: `src-tauri/target/universal-apple-darwin/release/bundle/`
 
 ## Wichtige Hinweise
 
+### Release-Prüfung
+
+Jeder Plattform-Job bricht ab, wenn das Paket strukturell ungültig ist:
+
+- macOS: universelles Binary (`lipo` enthält x86_64 und arm64), `--version` antwortet, Bundle-ID stimmt, DMG-Trailer und `hdiutil verify`
+- Windows: `--version` startet die EXE, NSIS ist ein PE der richtigen Architektur, MSI hat einen OLE-Header, `wintun.dll` liegt neben der EXE
+- Der Release-Job prüft die hochgeladenen Dateien noch einmal und legt `latest.json` **nur** an, wenn jede Updater-Datei eine Minisign-Signatur hat
+
+Ohne die Signatur-Secrets bleiben die Installer veröffentlicht, aber es gibt kein `latest.json`. Die App installiert dann kein Update.
+
 ### macOS Codesigning & Notarisierung
 Ohne Signierung zeigt macOS eine Sicherheitswarnung. Für signierte Builds folgende GitHub Secrets setzen:
 
@@ -110,6 +120,17 @@ env:
   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 ```
+
+### Automatische Updates
+
+Die App prüft `https://github.com/wedima/wireguard-vpn-client/releases/latest/download/latest.json`. Der Workflow schreibt diese Datei nur aus signierten Artefakten. Dafür müssen diese Secrets gesetzt sein, passend zum Public Key in `src-tauri/tauri.conf.json`:
+
+| Secret | Beschreibung |
+|--------|-------------|
+| `TAURI_SIGNING_PRIVATE_KEY` | Inhalt der Minisign-Private-Key-Datei (`pnpm tauri signer generate -w updater.key`) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Passwort dieses Keys |
+
+`requireSignedVersion` ist aktiv: die Signatur muss die Versionsnummer enthalten (Tauri CLI 2.12+). Ein Download ohne Signatur oder über HTTP wird nicht installiert.
 
 ### Windows Code Signing
 Ohne Signierung zeigt Windows SmartScreen eine Warnung. Für signierte Builds:

@@ -143,6 +143,22 @@ impl WgSession {
     }
 }
 
+#[cfg(target_os = "windows")]
+pub fn wintun_dll_path() -> std::path::PathBuf {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("wintun.dll"));
+            candidates.push(dir.join("resources").join("wintun.dll"));
+            candidates.push(dir.join("Resources").join("wintun.dll"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| std::path::PathBuf::from("wintun.dll"))
+}
+
 fn create_tun_device() -> Result<(tun2::AsyncDevice, String), String> {
     #[cfg(target_os = "macos")]
     {
@@ -151,13 +167,11 @@ fn create_tun_device() -> Result<(tun2::AsyncDevice, String), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
+        #[allow(unused_mut)]
         let mut cfg = tun2::Configuration::default();
         #[cfg(target_os = "windows")]
         {
-            let wintun_path = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("wintun.dll")))
-                .unwrap_or_else(|| std::path::PathBuf::from("wintun.dll"));
+            let wintun_path = wintun_dll_path();
             cfg.platform_config(|p| {
                 p.wintun_file(&wintun_path);
             });

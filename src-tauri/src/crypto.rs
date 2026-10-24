@@ -2,8 +2,16 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
+use zeroize::Zeroize;
+
+/// Documented import and storage KDF. Kept explicit so a crate default change
+/// cannot silently make existing configs undecryptable.
+fn argon2() -> Result<Argon2<'static>, String> {
+    let params = Params::new(19_456, 2, 1, Some(32)).map_err(|e| e.to_string())?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
+}
 
 pub const MAGIC_IMPORT: &[u8] = b"WGCV1\0";
 
@@ -23,7 +31,7 @@ const NONCE_LEN: usize = 12;
 
 fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
     let mut key = [0u8; 32];
-    Argon2::default()
+    argon2()?
         .hash_password_into(password.as_bytes(), salt, &mut key)
         .map_err(|e| e.to_string())?;
     Ok(key)
@@ -43,14 +51,16 @@ pub fn decrypt_imported(data: &[u8], password: &str) -> Result<Vec<u8>, String> 
     let nonce_bytes = &data[offset + SALT_LEN..offset + SALT_LEN + NONCE_LEN];
     let ciphertext = &data[offset + SALT_LEN + NONCE_LEN..];
 
-    let key_bytes = derive_key(password, salt)?;
+    let mut key_bytes = derive_key(password, salt)?;
     let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
     let cipher = Aes256Gcm::new(key);
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    cipher
+    let plain = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|_| "Decryption failed. Wrong password or corrupted file.".into())
+        .map_err(|_| "Decryption failed. Wrong password or corrupted file.".to_string());
+    key_bytes.zeroize();
+    plain
 }
 
 pub fn encrypt_for_storage(data: &[u8], password: &str) -> Result<Vec<u8>, String> {
@@ -59,14 +69,14 @@ pub fn encrypt_for_storage(data: &[u8], password: &str) -> Result<Vec<u8>, Strin
     let mut salt = [0u8; SALT_LEN];
     OsRng.fill_bytes(&mut salt);
 
-    let key_bytes = derive_key(password, &salt)?;
+    let mut key_bytes = derive_key(password, &salt)?;
     let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
     let cipher = Aes256Gcm::new(key);
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-    let ciphertext = cipher
-        .encrypt(&nonce, data)
-        .map_err(|e| e.to_string())?;
+    let ciphertext = cipher.encrypt(&nonce, data).map_err(|e| e.to_string());
+    key_bytes.zeroize();
+    let ciphertext = ciphertext?;
 
     let mut result = Vec::with_capacity(MAGIC_STORE.len() + SALT_LEN + NONCE_LEN + ciphertext.len());
     result.extend_from_slice(MAGIC_STORE);
@@ -91,12 +101,50 @@ pub fn decrypt_from_storage(data: &[u8], password: &str) -> Result<Vec<u8>, Stri
     let nonce_bytes = &data[offset + SALT_LEN..offset + SALT_LEN + NONCE_LEN];
     let ciphertext = &data[offset + SALT_LEN + NONCE_LEN..];
 
-    let key_bytes = derive_key(password, salt)?;
+    let mut key_bytes = derive_key(password, salt)?;
     let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
     let cipher = Aes256Gcm::new(key);
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    cipher
+    let plain = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|_| "Wrong password.".into())
+        .map_err(|_| "Wrong password.".to_string());
+    key_bytes.zeroize();
+    plain
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_roundtrip_and_tamper() {
+        let plain = b"[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n";
+        let mut blob = encrypt_for_storage(plain, "correct horse").unwrap();
+        assert_eq!(decrypt_from_storage(&blob, "correct horse").unwrap(), plain);
+        assert!(decrypt_from_storage(&blob, "wrong password").is_err());
+        let last = blob.len() - 1;
+        blob[last] ^= 0xff;
+        assert!(decrypt_from_storage(&blob, "correct horse").is_err());
+    }
+
+    #[test]
+    fn import_format_matches_admin_scripts() {
+        // Produced by the same argon2id (m=19456, t=2, p=1) and AES-256-GCM
+        // parameters as scripts/encrypt-config.py.
+        let blob = hex_decode("574743563100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000102030405060708090a0b1cfe74cf4152d53d39358e02b71f62285e108ed619ca69bda4387050d94e1d987b3fcb953fd2d3da0d62286100838f54ef52f40b859e5c7198cb82f051e7256c4ab7c429b15d5836d3809b20ba51505387e7150819cc");
+        let plain = decrypt_imported(&blob, "test-password").unwrap();
+        assert_eq!(
+            plain,
+            b"[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"
+        );
+        assert!(decrypt_imported(&blob, "other-password").is_err());
+    }
+
+    fn hex_decode(input: &str) -> Vec<u8> {
+        (0..input.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&input[i..i + 2], 16).unwrap())
+            .collect()
+    }
 }

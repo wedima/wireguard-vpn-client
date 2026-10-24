@@ -25,7 +25,12 @@ pub struct WgConfig {
 }
 
 pub fn cidr_to_netmask(prefix_len: u8) -> String {
-    let bits: u32 = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
+    let prefix_len = u32::from(prefix_len.min(32));
+    let bits: u32 = if prefix_len == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix_len)
+    };
     let [a, b, c, d] = bits.to_be_bytes();
     format!("{}.{}.{}.{}", a, b, c, d)
 }
@@ -147,7 +152,13 @@ pub fn parse(conf: &str) -> Result<WgConfig, String> {
         return Err("WireGuard config has no [Peer] section".into());
     }
 
-    Ok(WgConfig {
+    let name = name.map(|raw| {
+        let cleaned: String = raw.chars().filter(|c| !c.is_control()).take(80).collect();
+        cleaned
+    });
+    let name = name.filter(|value| !value.is_empty());
+
+    let cfg = WgConfig {
         interface: WgInterface {
             private_key: priv_key.ok_or("Interface missing PrivateKey")?,
             addresses: iface_addrs,
@@ -156,6 +167,47 @@ pub fn parse(conf: &str) -> Result<WgConfig, String> {
         },
         peers,
         name,
-    })
+    };
+    crate::validate::validate_config(&cfg)?;
+    Ok(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "\
+[Interface]
+PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Address = 10.0.0.2/32
+DNS = 1.1.1.1
+MTU = 1420
+
+[Peer]
+PublicKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0, fd00::/64
+";
+
+    #[test]
+    fn parses_a_normal_config() {
+        let cfg = parse(SAMPLE).unwrap();
+        assert_eq!(cfg.interface.addresses, vec!["10.0.0.2/32".to_string()]);
+        assert_eq!(cfg.peers[0].endpoint.as_deref(), Some("vpn.example.com:51820"));
+    }
+
+    #[test]
+    fn rejects_command_injection_in_allowed_ips() {
+        let bad = SAMPLE.replace("0.0.0.0/0", "0.0.0.0/0'; calc.exe");
+        assert!(parse(&bad).is_err());
+    }
+
+    #[test]
+    fn netmask_does_not_panic_on_wide_prefix() {
+        assert_eq!(cidr_to_netmask(0), "0.0.0.0");
+        assert_eq!(cidr_to_netmask(32), "255.255.255.255");
+        assert_eq!(cidr_to_netmask(24), "255.255.255.0");
+        let _ = cidr_to_netmask(255);
+    }
 }
 

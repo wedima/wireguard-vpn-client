@@ -1,8 +1,13 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::Manager;
+use zeroize::Zeroize;
 
 use crate::crypto;
+use crate::secret_file;
+
+const MAX_CONFIG_BYTES: u64 = 256 * 1024;
+const MIN_PASSWORD_CHARS: usize = 8;
 
 #[cfg(target_os = "windows")]
 fn is_elevated() -> bool {
@@ -100,7 +105,24 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 fn ensure_data_dir(app: &tauri::AppHandle) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+fn read_limited_file(path: &Path) -> Result<Vec<u8>, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("Cannot read file: {}", e))?;
+    if !meta.is_file() {
+        return Err("Not a file.".into());
+    }
+    if meta.len() > MAX_CONFIG_BYTES {
+        return Err("Config file is too large.".into());
+    }
+    std::fs::read(path).map_err(|e| format!("Cannot read file: {}", e))
 }
 
 fn read_state(app: &tauri::AppHandle) -> StoredState {
@@ -111,8 +133,8 @@ fn read_state(app: &tauri::AppHandle) -> StoredState {
 
 fn write_state(app: &tauri::AppHandle, s: &StoredState) -> Result<(), String> {
     ensure_data_dir(app)?;
-    let content = serde_json::to_string(s).map_err(|e| e.to_string())?;
-    std::fs::write(state_path(app)?, content).map_err(|e| e.to_string())
+    let content = serde_json::to_vec(s).map_err(|e| e.to_string())?;
+    secret_file::write_private(&state_path(app)?, &content)
 }
 
 // ── Commands ──────────────────────────────────────────────────────────────────
@@ -147,7 +169,7 @@ pub async fn check_status(
 
 #[tauri::command]
 pub async fn detect_config_type(file_path: String) -> Result<String, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Cannot read file: {}", e))?;
+    let data = read_limited_file(Path::new(&file_path))?;
     if crypto::is_encrypted(&data) {
         Ok("encrypted".into())
     } else if crypto::is_plain_wireguard(&data) {
@@ -164,11 +186,14 @@ pub async fn import_config(
     file_path: String,
     password: Option<String>,
 ) -> Result<(), String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Cannot read file: {}", e))?;
+    let data = read_limited_file(Path::new(&file_path))?;
 
+    let mut password = password;
     let plaintext = if crypto::is_encrypted(&data) {
-        let pwd = password.ok_or("Encrypted file requires a decryption password.")?;
-        crypto::decrypt_imported(&data, &pwd)?
+        let pwd = password
+            .as_deref()
+            .ok_or("Encrypted file requires a decryption password.")?;
+        crypto::decrypt_imported(&data, pwd)?
     } else if crypto::is_plain_wireguard(&data) {
         data
     } else {
@@ -176,13 +201,16 @@ pub async fn import_config(
     };
 
     let conf_str = std::str::from_utf8(&plaintext).map_err(|_| "Config is not valid UTF-8.")?;
-    if !conf_str.contains("[Interface]") {
-        return Err("File does not appear to be a WireGuard configuration.".into());
+    let parsed = crate::wg_config::parse(conf_str)?;
+    let connection_name = parsed.name;
+
+    if let Some(previous) = state.pending_config.lock().unwrap().replace(plaintext) {
+        let mut previous = previous;
+        previous.zeroize();
     }
-
-    let connection_name = crate::wg_config::parse(conf_str).ok().and_then(|c| c.name);
-
-    *state.pending_config.lock().unwrap() = Some(plaintext);
+    if let Some(pwd) = password.as_mut() {
+        pwd.zeroize();
+    }
     ensure_data_dir(&app)?;
     write_state(&app, &StoredState { has_config: true, has_password: false, connection_name })
 }
@@ -193,21 +221,26 @@ pub async fn setup_connection_password(
     state: tauri::State<'_, AppState>,
     password: String,
 ) -> Result<(), String> {
-    let plaintext = state
+    if password.chars().count() < MIN_PASSWORD_CHARS {
+        return Err("Password must be at least 8 characters.".into());
+    }
+    let mut password = password;
+    let mut plaintext = state
         .pending_config
         .lock()
         .unwrap()
-        .clone()
+        .take()
         .ok_or("No config in memory. Please import again.")?;
 
-    let encrypted = crypto::encrypt_for_storage(&plaintext, &password)?;
+    let encrypted = crypto::encrypt_for_storage(&plaintext, &password);
+    plaintext.zeroize();
+    password.zeroize();
+    let encrypted = encrypted?;
 
     ensure_data_dir(&app)?;
-    std::fs::write(config_path(&app)?, &encrypted)
-        .map_err(|e| format!("Failed to save config: {}", e))?;
+    secret_file::write_private(&config_path(&app)?, &encrypted)?;
 
     let connection_name = read_state(&app).connection_name;
-    *state.pending_config.lock().unwrap() = None;
     write_state(&app, &StoredState { has_config: true, has_password: true, connection_name })
 }
 
@@ -217,11 +250,16 @@ pub async fn connect(
     state: tauri::State<'_, AppState>,
     password: String,
 ) -> Result<(), String> {
+    let mut password = password;
     let encrypted = std::fs::read(config_path(&app)?)
         .map_err(|_| "No config found. Please import first.")?;
-    let plaintext = crypto::decrypt_from_storage(&encrypted, &password)?;
-    let conf_str =
+    let plaintext = crypto::decrypt_from_storage(&encrypted, &password);
+    password.zeroize();
+    let plaintext = plaintext?;
+    let mut conf_str =
         String::from_utf8(plaintext).map_err(|_| "Config content is invalid UTF-8.")?;
+    // Parsing here rejects configs that would be unsafe to hand to the helper.
+    crate::wg_config::parse(&conf_str)?;
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -235,11 +273,12 @@ pub async fn connect(
             .to_string_lossy()
             .into_owned();
 
-        if !tunnel_daemon::is_installed() {
+        if !tunnel_daemon::helper_is_current(&exe) {
             tunnel_daemon::install(&exe)?;
         }
 
-        let config_b64 = B64.encode(conf_str.as_bytes());
+        let mut config_b64 = B64.encode(conf_str.as_bytes());
+        conf_str.zeroize();
 
         #[cfg(target_os = "macos")]
         let stream_res = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH).await;
@@ -258,12 +297,18 @@ pub async fn connect(
 
         let stream = stream_res.map_err(|e| format!("Cannot reach helper daemon: {}. Try restarting the app.", e))?;
         let mut stream = stream;
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::io::AsRawHandle;
+            tunnel_daemon::ensure_pipe_peer_is_helper(stream.as_raw_handle(), true)?;
+        }
 
         stream
             .write_all(format!("START {}\n", config_b64).as_bytes())
             .await
             .map_err(|e| e.to_string())?;
         stream.flush().await.ok();
+        config_b64.zeroize();
 
         let mut response = String::new();
         {
@@ -293,6 +338,7 @@ pub async fn connect(
     {
         use crate::wg_tunnel::WgSession;
         let session = WgSession::start(&conf_str).await?;
+        conf_str.zeroize();
         *state.session.lock().await = Some(session);
     }
 
@@ -334,12 +380,14 @@ pub async fn reset_config(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     if let Ok(p) = config_path(&app) {
-        let _ = std::fs::remove_file(p);
+        let _ = secret_file::shred_remove(&p);
     }
     if let Ok(p) = state_path(&app) {
-        let _ = std::fs::remove_file(p);
+        let _ = secret_file::shred_remove(&p);
     }
-    *state.pending_config.lock().unwrap() = None;
+    if let Some(mut pending) = state.pending_config.lock().unwrap().take() {
+        pending.zeroize();
+    }
     Ok(())
 }
 
@@ -376,6 +424,11 @@ pub async fn get_stats(
         };
 
         let mut stream = stream_res.map_err(|e| format!("Stats connect: {}", e))?;
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::io::AsRawHandle;
+            tunnel_daemon::ensure_pipe_peer_is_helper(stream.as_raw_handle(), true)?;
+        }
 
         stream.write_all(b"STATS\n").await.map_err(|e| e.to_string())?;
         stream.flush().await.map_err(|e| e.to_string())?;
@@ -416,19 +469,7 @@ pub async fn get_stats(
 #[tauri::command]
 pub async fn quit_app(_app: tauri::AppHandle) {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        use crate::tunnel_daemon;
-        use tokio::io::AsyncWriteExt;
-        #[cfg(target_os = "macos")]
-        let stream_res = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH).await;
-        #[cfg(target_os = "windows")]
-        let stream_res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
-        
-        if let Ok(mut stream) = stream_res {
-            let _ = stream.write_all(b"SHUTDOWN\n").await;
-            let _ = stream.flush().await;
-        }
-    }
+    crate::tunnel_daemon::request_shutdown().await;
     std::process::exit(0);
 }
 
@@ -439,10 +480,13 @@ pub async fn uninstall_helper() -> Result<(), String> {
         use crate::tunnel_daemon;
         let script = format!(
             "launchctl unload -w '{plist}' 2>/dev/null; \
-             rm -f '{plist}'; \
-             rm -f '{helper}'",
+             rm -f '{plist}' '{helper}' '{uid}' '{version}' '{client}' '{socket}'",
             plist = tunnel_daemon::PLIST_DEST,
             helper = tunnel_daemon::HELPER_DEST,
+            uid = tunnel_daemon::UID_FILE,
+            version = tunnel_daemon::VERSION_FILE,
+            client = tunnel_daemon::CLIENT_FILE,
+            socket = tunnel_daemon::SOCKET_PATH,
         );
         let apple_script = format!(
             "do shell script \"{}\" with administrator privileges",

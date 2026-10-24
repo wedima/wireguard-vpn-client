@@ -44,6 +44,7 @@ The user **never sees or touches** the raw WireGuard configuration. Everything i
 - **System tray** — minimizes to tray, click to show/hide, right-click menu
 - Settings menu: Delete Connection, Uninstall Helper, Quit Application
 - **No external dependencies** — boringtun userspace WireGuard is bundled
+- **Optional automatic updates** — off unless the user turns them on. A release is installed only after its minisign signature is checked
 
 ---
 
@@ -192,6 +193,14 @@ wedima-vpn-wg/
 - The stored `config.enc` can only be decrypted by someone who knows the user's personal password.
 - The import password (Admin password) is only used transiently during import and is never stored.
 - IPv6 is disabled on the host when the tunnel does not carry IPv6, preventing address leaks on untrusted networks.
+- The privileged helper accepts commands only from the installed app. On macOS the socket is private to the installing user and, for a signed build, the connecting program must carry the same Developer Team ID. On Windows the service pipe is limited to that user and to this executable.
+- Config fields that become network commands are checked as addresses, DNS names, and endpoints before they are used.
+- Stored config files are written so only the current user can read them.
+- Automatic updates are off by default. The app downloads a GitHub release only over HTTPS, only from this repository, and only when the artifact carries a signature made by the key built into the app. An unsigned download is not installed.
+
+### Automatic updates
+
+Settings → **Update automatically**. While that is on, the app checks GitHub Releases after launch and installs a newer signed release. **Check for updates** does the same check once. Turning the option off stops later automatic checks. Applying an update restarts the app and briefly drops the tunnel.
 
 ---
 

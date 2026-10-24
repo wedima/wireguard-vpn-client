@@ -306,6 +306,7 @@ mod platform {
         dns: &[String],
         peer_endpoint_ip: &str,
     ) -> Result<(), String> {
+        crate::validate::validate_iface_name(interface)?;
         let netmask = cidr_to_netmask(iface_cfg.prefix_len);
 
         // Set IP and MTU
@@ -436,6 +437,7 @@ mod platform {
         allowed_ips: &[String],
         _dns: &[String],
     ) -> Result<(), String> {
+        crate::validate::validate_iface_name(interface)?;
         // Remove IPv4 routes
         for cidr in allowed_ips.iter().filter(|c| !c.contains(':')) {
             if cidr == "0.0.0.0/0" || cidr == "0/0" {
@@ -483,6 +485,7 @@ mod platform {
     }
 
     fn get_interface_index(name: &str) -> Result<String, String> {
+        crate::validate::validate_iface_name(name)?;
         let out = std::process::Command::new("powershell")
             .args([
                 "-NoProfile", "-NonInteractive", "-Command",
