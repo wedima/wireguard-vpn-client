@@ -2,7 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildLatestJson, releaseAssetUrl } from "./make-latest-json.mjs";
 
-const signature = "B".repeat(90);
+function fakeSignature(version = "0.1.7") {
+  const text = [
+    "untrusted comment: test",
+    "RUSaaaaaaaa",
+    `trusted comment: timestamp:1\tfile:payload.bin\tversion:${version}`,
+    "bbbb",
+    "",
+  ].join("\n");
+  return Buffer.from(text).toString("base64");
+}
+
+const signature = fakeSignature("0.1.7");
 
 test("asset URLs stay on this repository over HTTPS", () => {
   const url = releaseAssetUrl("v0.1.7", "Wedima VPN WG_0.1.7_x64-setup.exe");
@@ -30,6 +41,6 @@ test("manifest requires a signature for every platform", () => {
         pubDate: "2026-10-24T00:00:00Z",
         assets: [{ platform: "windows-x86_64", filename: "setup.exe", signature: "", tag: "v0.1.7" }],
       }),
-    /unsigned/
+    /unsigned|empty|signature/
   );
 });

@@ -123,14 +123,16 @@ env:
 
 ### Automatische Updates
 
-Die App prüft `https://github.com/wedima/wireguard-vpn-client/releases/latest/download/latest.json`. Der Workflow schreibt diese Datei nur aus signierten Artefakten. Dafür müssen diese Secrets gesetzt sein, passend zum Public Key in `src-tauri/tauri.conf.json`:
+Die App prüft nur `https://github.com/wedima/wireguard-vpn-client/releases/latest/download/latest.json`. Ohne die beiden Secrets unten schreibt der Workflow **kein** `latest.json`. Die App installiert dann kein Update. Ein Artefakt ohne gültige Minisign-Signatur, mit einer anderen Version im Trusted Comment, oder von einer anderen URL wird verworfen.
 
-| Secret | Beschreibung |
-|--------|-------------|
-| `TAURI_SIGNING_PRIVATE_KEY` | Inhalt der Minisign-Private-Key-Datei (`pnpm tauri signer generate -w updater.key`) |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Passwort dieses Keys |
+Der Public Key steht in `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`). Die Secrets müssen zu genau diesem Key passen:
 
-`requireSignedVersion` ist aktiv: die Signatur muss die Versionsnummer enthalten (Tauri CLI 2.12+). Ein Download ohne Signatur oder über HTTP wird nicht installiert.
+| Secret | Wert |
+|--------|------|
+| `TAURI_SIGNING_PRIVATE_KEY` | Gesamter Inhalt der Private-Key-Datei, ohne sie ins Repo zu committen |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Passwort dieser Datei, ebenfalls nur als Secret |
+
+Dieses Environment kann die Secrets nicht setzen (GitHub antwortet mit 403). Der Repo-Owner muss sie unter **Settings → Secrets and variables → Actions** anlegen. Danach signiert `tauri build` die Updater-Artefakte, und der Release-Job veröffentlicht `latest.json` nur wenn jede Datei eine Signatur hat.
 
 ### Windows Code Signing
 Ohne Signierung zeigt Windows SmartScreen eine Warnung. Für signierte Builds:

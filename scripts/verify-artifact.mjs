@@ -77,10 +77,32 @@ function verifyGzip(bytes) {
   return {};
 }
 
+export function assertUpdaterSignature(signature, version) {
+  verifyArtifact("sig", Buffer.from(String(signature), "utf8"));
+  const decoded = Buffer.from(String(signature).trim(), "base64").toString("utf8");
+  const versionOk =
+    decoded.includes(`version:${version}`) || decoded.includes(`version:v${version}`);
+  if (!versionOk) {
+    throw new Error(`Refusing update manifest: signature is not for version ${version}`);
+  }
+}
+
 function verifySignature(bytes) {
   const text = bytes.toString("utf8").trim();
   if (text.length < 80) {
     throw new Error("Update signature is missing or too short to be a minisign signature");
+  }
+  let decoded;
+  try {
+    decoded = Buffer.from(text, "base64").toString("utf8");
+  } catch {
+    throw new Error("Update signature is not minisign base64");
+  }
+  if (!decoded.includes("untrusted comment:") || !decoded.includes("trusted comment:")) {
+    throw new Error("Update signature is not a minisign signature");
+  }
+  if (!/version:\d+\.\d+\.\d+/.test(decoded)) {
+    throw new Error("Update signature does not include a signed version");
   }
   return {};
 }

@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use base64::Engine;
+use minisign_verify::{PublicKey, Signature};
+use semver::Version;
 use serde::Serialize;
 use tauri::Manager;
 use tauri_plugin_updater::UpdaterExt;
@@ -19,6 +22,11 @@ use crate::secret_file;
 
 pub const RELEASE_ENDPOINT: &str =
     "https://github.com/wedima/wireguard-vpn-client/releases/latest/download/latest.json";
+
+/// Minisign public key compiled into the app. This is the base64 form Tauri
+/// stores in `tauri.conf.json`; the updater refuses to install unless a
+/// signature verifies against this exact key.
+pub const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCQTA3REU1QzYzMkMwOUQKUldTZHdETEc1WDJnTzR4cWNIWms1Z2NKejJzUlZUcGkzU0w5UVptYThVS0t2d2dPLy8vcEhFaUcK";
 
 const ALLOWED_HOSTS: &[&str] = &[
     "github.com",
@@ -50,6 +58,16 @@ fn prefs_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .join("update-settings.json"))
 }
 
+/// Missing, unreadable, or malformed settings stay off.
+pub fn parse_auto_update(raw: Option<&str>) -> bool {
+    let Some(raw) = raw else {
+        return false;
+    };
+    serde_json::from_str::<UpdatePrefs>(raw)
+        .map(|prefs| prefs.auto_update)
+        .unwrap_or(false)
+}
+
 pub fn auto_update_enabled(app: &tauri::AppHandle) -> bool {
     let Ok(path) = prefs_path(app) else {
         return false;
@@ -57,9 +75,7 @@ pub fn auto_update_enabled(app: &tauri::AppHandle) -> bool {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return false;
     };
-    serde_json::from_str::<UpdatePrefs>(&raw)
-        .map(|prefs| prefs.auto_update)
-        .unwrap_or(false)
+    parse_auto_update(Some(&raw))
 }
 
 pub fn set_auto_update_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
@@ -128,6 +144,70 @@ pub fn signature_is_present(signature: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn decode_base64_text(value: &str) -> Result<String, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .map_err(|_| "Refusing update: signature is not a minisign signature".to_string())?;
+    String::from_utf8(bytes)
+        .map_err(|_| "Refusing update: signature is not a minisign signature".to_string())
+}
+
+fn versions_match(signed: &str, announced: &str) -> bool {
+    let signed = signed.trim().trim_start_matches('v');
+    let announced = announced.trim().trim_start_matches('v');
+    match (Version::parse(signed), Version::parse(announced)) {
+        (Ok(signed), Ok(announced)) => signed == announced,
+        _ => signed == announced,
+    }
+}
+
+/// Verify artifact bytes the same way the Tauri updater does: minisign over
+/// the bytes and over the trusted comment, then require that comment's
+/// `version:` to match the manifest. Nothing is installed unless this returns
+/// `Ok`.
+pub fn verify_update_artifact(
+    bytes: &[u8],
+    signature_b64: &str,
+    announced_version: &str,
+) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Err("Refusing update: artifact is empty".into());
+    }
+    signature_is_present(signature_b64)?;
+    let pubkey_text = decode_base64_text(UPDATE_PUBKEY)?;
+    let signature_text = decode_base64_text(signature_b64)?;
+    let public_key = PublicKey::decode(&pubkey_text)
+        .map_err(|_| "Refusing update: embedded public key is invalid".to_string())?;
+    let signature = Signature::decode(&signature_text)
+        .map_err(|_| "Refusing update: signature is not a minisign signature".to_string())?;
+    // `allow_legacy` matches tauri-plugin-updater: Tauri signatures are not prehashed.
+    public_key
+        .verify(bytes, &signature, true)
+        .map_err(|_| "Refusing update: signature does not match the artifact".to_string())?;
+    let trusted = signature.trusted_comment();
+    let Some(signed_version) = trusted
+        .split('\t')
+        .find_map(|field| field.strip_prefix("version:"))
+    else {
+        return Err("Refusing update: signature does not name a version".into());
+    };
+    if !versions_match(signed_version, announced_version) {
+        return Err("Refusing update: signed version does not match the manifest".into());
+    }
+    Ok(())
+}
+
+/// URL and signature gate used immediately before an update is installed.
+pub fn authorize_update_install(
+    download_url: &str,
+    signature: &str,
+    bytes: &[u8],
+    announced_version: &str,
+) -> Result<(), String> {
+    artifact_url_is_trusted(download_url)?;
+    verify_update_artifact(bytes, signature, announced_version)
+}
+
 #[tauri::command]
 pub fn get_auto_update(app: tauri::AppHandle) -> bool {
     auto_update_enabled(&app)
@@ -161,12 +241,11 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<UpdateReport, Str
 
 async fn download_verified_update(app: &tauri::AppHandle) -> Result<UpdateReport, String> {
     endpoint_is_trusted(RELEASE_ENDPOINT)?;
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    crate::tunnel_daemon::request_shutdown().await;
 
     let endpoint = Url::parse(RELEASE_ENDPOINT).map_err(|e| e.to_string())?;
     let updater = app
         .updater_builder()
+        .pubkey(UPDATE_PUBKEY)
         .endpoints(vec![endpoint])
         .map_err(|e| e.to_string())?
         .timeout(Duration::from_secs(180))
@@ -185,11 +264,23 @@ async fn download_verified_update(app: &tauri::AppHandle) -> Result<UpdateReport
     artifact_url_is_trusted(update.download_url.as_str())?;
     signature_is_present(&update.signature)?;
     let version = update.version.clone();
-
-    update
-        .download_and_install(|_, _| {}, || {})
+    // The plugin verifies during download. We verify again and only then install.
+    let bytes = update
+        .download(|_, _| {}, || {})
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| "Refusing update: download or signature check failed".to_string())?;
+    authorize_update_install(
+        update.download_url.as_str(),
+        &update.signature,
+        &bytes,
+        &version,
+    )?;
+    // Drop the tunnel only after the artifact is authenticated.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    crate::tunnel_daemon::request_shutdown().await;
+    update
+        .install(&bytes)
+        .map_err(|_| "Refusing update: verified artifact could not be installed".to_string())?;
 
     let report = UpdateReport {
         status: "installed".into(),
@@ -238,5 +329,50 @@ mod tests {
         assert!(signature_is_present("").is_err());
         assert!(signature_is_present("short").is_err());
         assert!(signature_is_present(&"A".repeat(80)).is_ok());
+    }
+
+    const FIXTURE: &[u8] = include_bytes!("../update-fixtures/payload.bin");
+    const FIXTURE_SIG: &str = include_str!("../update-fixtures/payload.bin.sig");
+
+    #[test]
+    fn auto_update_stays_off_without_an_explicit_setting() {
+        assert!(!parse_auto_update(None));
+        assert!(!parse_auto_update(Some("")));
+        assert!(!parse_auto_update(Some("not json")));
+        assert!(!parse_auto_update(Some("{}")));
+        assert!(!parse_auto_update(Some(r#"{"auto_update":false}"#)));
+        assert!(parse_auto_update(Some(r#"{"auto_update":true}"#)));
+    }
+
+    #[test]
+    fn embedded_pubkey_matches_tauri_config() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let updater = &conf["plugins"]["updater"];
+        assert_eq!(updater["pubkey"].as_str(), Some(UPDATE_PUBKEY));
+        assert_eq!(updater["dangerousInsecureTransportProtocol"], false);
+        assert_eq!(updater["requireSignedVersion"], true);
+        endpoint_is_trusted(updater["endpoints"][0].as_str().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn signed_fixture_installs_only_after_a_valid_signature() {
+        let url = "https://github.com/wedima/wireguard-vpn-client/releases/download/v0.1.7/payload.bin";
+        authorize_update_install(url, FIXTURE_SIG.trim(), FIXTURE, "0.1.7").unwrap();
+        authorize_update_install(url, FIXTURE_SIG.trim(), FIXTURE, "v0.1.7").unwrap();
+
+        let mut tampered = FIXTURE.to_vec();
+        tampered[0] ^= 0xff;
+        assert!(authorize_update_install(url, FIXTURE_SIG.trim(), &tampered, "0.1.7").is_err());
+        assert!(authorize_update_install(url, "", FIXTURE, "0.1.7").is_err());
+        assert!(authorize_update_install(url, &"A".repeat(80), FIXTURE, "0.1.7").is_err());
+        assert!(authorize_update_install(url, FIXTURE_SIG.trim(), FIXTURE, "9.9.9").is_err());
+        assert!(authorize_update_install(
+            "http://github.com/wedima/wireguard-vpn-client/releases/download/v0.1.7/payload.bin",
+            FIXTURE_SIG.trim(),
+            FIXTURE,
+            "0.1.7"
+        )
+        .is_err());
     }
 }

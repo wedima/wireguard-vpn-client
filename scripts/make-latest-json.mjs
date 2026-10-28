@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { assertUpdaterSignature } from "./verify-artifact.mjs";
 
 const REPO = "wedima/wireguard-vpn-client";
 
@@ -28,9 +29,7 @@ export function buildLatestJson({ version, notes, pubDate, assets }) {
   const platforms = {};
   for (const asset of assets) {
     const signature = String(asset.signature ?? "").trim();
-    if (signature.length < 80) {
-      throw new Error(`Refusing unsigned update artifact for ${asset.platform}`);
-    }
+    assertUpdaterSignature(signature, version);
     const url = releaseAssetUrl(asset.tag, asset.filename);
     platforms[asset.platform] = { signature, url };
   }

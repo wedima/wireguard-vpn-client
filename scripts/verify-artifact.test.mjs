@@ -32,8 +32,19 @@ test("accepts msi, dmg, and gzip magics", () => {
   verifyArtifact("gzip", Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0]));
 });
 
-test("rejects a short or empty update signature", () => {
+function fakeSignature(version = "0.1.7") {
+  const text = [
+    "untrusted comment: test",
+    "RUSaaaaaaaa",
+    `trusted comment: timestamp:1\tfile:payload.bin\tversion:${version}`,
+    "bbbb",
+    "",
+  ].join("\n");
+  return Buffer.from(text).toString("base64");
+}
+
+test("rejects a short or unsigned update signature", () => {
   assert.throws(() => verifyArtifact("sig", Buffer.from("")), /empty|short|signature/);
-  assert.throws(() => verifyArtifact("sig", Buffer.from("not-a-signature")), /signature/);
-  verifyArtifact("sig", Buffer.from("A".repeat(80)));
+  assert.throws(() => verifyArtifact("sig", Buffer.from("A".repeat(80))), /minisign|version|signature/);
+  verifyArtifact("sig", Buffer.from(fakeSignature()));
 });

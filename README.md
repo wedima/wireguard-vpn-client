@@ -195,8 +195,8 @@ wedima-vpn-wg/
 - IPv6 is disabled on the host when the tunnel does not carry IPv6, preventing address leaks on untrusted networks.
 - The privileged helper accepts commands only from the installed app. On macOS the socket is private to the installing user and, for a signed build, the connecting program must carry the same Developer Team ID. On Windows the service pipe is limited to that user and to this executable.
 - Config fields that become network commands are checked as addresses, DNS names, and endpoints before they are used.
-- Stored config files are written so only the current user can read them.
-- Automatic updates are off by default. The app downloads a GitHub release only over HTTPS, only from this repository, and only when the artifact carries a signature made by the key built into the app. An unsigned download is not installed.
+- On Unix, `config.enc` is mode `0600`. On Windows it is stored in the per-user application data directory.
+- Automatic updates are off by default. The app downloads a GitHub release only over HTTPS, only from this repository, and installs it only after the artifact's minisign signature matches the key built into the app and names the same version. An unsigned or tampered download is not installed.
 
 ### Automatic updates
 
