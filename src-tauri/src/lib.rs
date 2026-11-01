@@ -1,6 +1,7 @@
 mod commands;
 mod crypto;
 mod secret_file;
+mod tunnel_slot;
 mod updates;
 mod validate;
 mod wg_config;
@@ -44,7 +45,8 @@ pub fn run() {
 
             let show_item = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit Wedima VPN WG", true, None::<&str>)?;
+            let quit_item =
+                MenuItem::with_id(app, "quit", "Quit Wedima VPN WG", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &sep, &quit_item])?;
 
             let tray_icon = {
@@ -112,8 +114,7 @@ pub fn run() {
                 }
             }
 
-            // A saved auto-update preference is left as the user set it.
-            // Startup still installs only a signed release from this repository.
+            // Installs a signed release at startup unless that setting is explicitly off.
             updates::spawn_startup_update(app.handle());
 
             Ok(())

@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use boringtun::noise::{Tunn, TunnResult};
+use boringtun::x25519::{PublicKey, StaticSecret};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::interval;
-use boringtun::x25519::{PublicKey, StaticSecret};
 
 use crate::wireguard::{self, IfaceConfig};
 
@@ -21,6 +21,7 @@ pub struct WgSession {
     pub dns: Vec<String>,
     pub bytes_tx: Arc<AtomicU64>,
     pub bytes_rx: Arc<AtomicU64>,
+    ipv6_blackhole: bool,
 }
 
 impl WgSession {
@@ -66,18 +67,24 @@ impl WgSession {
         let tunn: Arc<Mutex<Tunn>> = Arc::new(Mutex::new(tunn));
         let (stop_tx, _) = broadcast::channel::<()>(4);
 
-        let (iface_addr, prefix_len) = if let Some(addr_cidr) = config.interface.addresses.iter().find(|a| !a.contains(':')) {
-            let (addr, prefix) = addr_cidr.split_once('/').unwrap_or((addr_cidr, "24"));
-            let prefix_len: u8 = prefix.parse().unwrap_or(24);
-            (addr.to_string(), prefix_len)
-        } else {
-            return Err("No IPv4 address in [Interface] section".to_string());
-        };
+        let (iface_addr, prefix_len) =
+            if let Some(addr_cidr) = config.interface.addresses.iter().find(|a| !a.contains(':')) {
+                let (addr, prefix) = addr_cidr.split_once('/').unwrap_or((addr_cidr, "24"));
+                let prefix_len: u8 = prefix.parse().unwrap_or(24);
+                (addr.to_string(), prefix_len)
+            } else {
+                return Err("No IPv4 address in [Interface] section".to_string());
+            };
 
-        let iface_addr6 = config.interface.addresses.iter().find(|a| a.contains(':')).map(|cidr| {
-            let (a, p) = cidr.split_once('/').unwrap_or((cidr, "128"));
-            (a.to_string(), p.parse::<u8>().unwrap_or(128))
-        });
+        let iface_addr6 = config
+            .interface
+            .addresses
+            .iter()
+            .find(|a| a.contains(':'))
+            .map(|cidr| {
+                let (a, p) = cidr.split_once('/').unwrap_or((cidr, "128"));
+                (a.to_string(), p.parse::<u8>().unwrap_or(128))
+            });
 
         let iface_cfg = IfaceConfig {
             addr: &iface_addr,
@@ -86,6 +93,8 @@ impl WgSession {
             mtu: config.interface.mtu,
         };
 
+        let ipv6_blackhole =
+            crate::validate::should_block_native_ipv6(iface_addr6.is_some(), &peer.allowed_ips);
         wireguard::setup_routes(
             &interface_name,
             &iface_cfg,
@@ -133,12 +142,18 @@ impl WgSession {
             dns: config.interface.dns.clone(),
             bytes_tx,
             bytes_rx,
+            ipv6_blackhole,
         })
     }
 
     pub fn stop(self) -> Result<(), String> {
         let _ = self.stop_tx.send(());
-        wireguard::remove_routes(&self.interface_name, &self.allowed_ips, &self.dns)
+        wireguard::remove_routes(
+            &self.interface_name,
+            &self.allowed_ips,
+            &self.dns,
+            self.ipv6_blackhole,
+        )
     }
 }
 
@@ -178,7 +193,10 @@ fn create_tun_device() -> Result<(tun2::AsyncDevice, String), String> {
         let device = tun2::create_as_async(&cfg)
             .map_err(|e| format!("Failed to create TUN device: {}", e))?;
         use tun2::AbstractDevice;
-        let name = device.tun_name().map_err(|e: tun2::Error| e.to_string())?.to_string();
+        let name = device
+            .tun_name()
+            .map_err(|e: tun2::Error| e.to_string())?
+            .to_string();
         Ok((device, name))
     }
 }
@@ -206,8 +224,8 @@ mod macos_utun {
             p.packet_information(true);
         });
 
-        let device = tun2::create_as_async(&cfg)
-            .map_err(|e| format!("Failed to wrap utun fd: {}", e))?;
+        let device =
+            tun2::create_as_async(&cfg).map_err(|e| format!("Failed to wrap utun fd: {}", e))?;
 
         Ok((device, name))
     }
@@ -227,7 +245,8 @@ mod macos_utun {
                 ctl_name: [0u8; 96],
             };
             let name_bytes = UTUN_CONTROL_NAME;
-            info.ctl_name[..name_bytes.len() - 1].copy_from_slice(&name_bytes[..name_bytes.len() - 1]);
+            info.ctl_name[..name_bytes.len() - 1]
+                .copy_from_slice(&name_bytes[..name_bytes.len() - 1]);
 
             if libc::ioctl(fd, CTLIOCGINFO, &mut info as *mut _ as *mut libc::c_void) < 0 {
                 libc::close(fd);

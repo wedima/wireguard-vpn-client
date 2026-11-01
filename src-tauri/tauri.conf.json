@@ -49,6 +49,7 @@
     "windows": {
       "digestAlgorithm": "sha256",
       "timestampUrl": "http://timestamp.digicert.com",
+      "allowDowngrades": false,
       "nsis": {
         "installerHooks": "windows/hooks.nsh"
       }
@@ -62,6 +63,7 @@
       ],
       "dangerousInsecureTransportProtocol": false,
       "requireSignedVersion": true,
+      "allowDowngrades": false,
       "windows": {
         "installMode": "passive"
       }

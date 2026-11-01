@@ -19,8 +19,9 @@ pub fn remove_routes(
     interface: &str,
     allowed_ips: &[String],
     dns: &[String],
+    ipv6_blackhole: bool,
 ) -> Result<(), String> {
-    platform::teardown(interface, allowed_ips, dns)
+    platform::teardown(interface, allowed_ips, dns, ipv6_blackhole)
 }
 
 // ── macOS ────────────────────────────────────────────────────────────────────
@@ -60,10 +61,7 @@ mod platform {
                 continue;
             }
             if cidr == "0.0.0.0/0" || cidr == "0/0" {
-                cmds.push(format!(
-                    "route add -net 0.0.0.0/1 -interface {}",
-                    interface
-                ));
+                cmds.push(format!("route add -net 0.0.0.0/1 -interface {}", interface));
                 cmds.push(format!(
                     "route add -net 128.0.0.0/1 -interface {}",
                     interface
@@ -74,7 +72,11 @@ mod platform {
         }
 
         if !dns.is_empty() {
-            let v4: Vec<&str> = dns.iter().filter(|d| !d.contains(':')).map(|s| s.as_str()).collect();
+            let v4: Vec<&str> = dns
+                .iter()
+                .filter(|d| !d.contains(':'))
+                .map(|s| s.as_str())
+                .collect();
             if !v4.is_empty() {
                 let list = v4.join(" ");
                 for svc in network_services() {
@@ -90,6 +92,7 @@ mod platform {
         interface: &str,
         allowed_ips: &[String],
         dns: &[String],
+        _ipv6_blackhole: bool,
     ) -> Result<(), String> {
         let mut cmds: Vec<String> = vec![];
 
@@ -107,7 +110,10 @@ mod platform {
                     interface
                 ));
             } else {
-                cmds.push(format!("route delete -net {} -interface {}", cidr, interface));
+                cmds.push(format!(
+                    "route delete -net {} -interface {}",
+                    cidr, interface
+                ));
             }
         }
 
@@ -184,8 +190,71 @@ mod platform {
         dns: &[String],
         peer_endpoint_ip: &str,
     ) -> Result<(), String> {
-        let mut cmds: Vec<Vec<String>> = vec![];
+        crate::validate::validate_iface_name(interface)?;
+        let gateway = default_gateway().filter(|gw| crate::validate::is_ip_address(gw));
+        let commands = linux_setup_commands(
+            interface,
+            iface_cfg,
+            allowed_ips,
+            peer_endpoint_ip,
+            gateway.as_deref(),
+        );
+        run_privileged(commands)?;
 
+        if !dns.is_empty() {
+            let mut args = vec!["resolvectl".into(), "dns".into(), interface.to_string()];
+            args.extend(dns.iter().cloned());
+            let _ = run_privileged(vec![args]);
+        }
+
+        Ok(())
+    }
+
+    pub fn teardown(
+        interface: &str,
+        allowed_ips: &[String],
+        dns: &[String],
+        ipv6_blackhole: bool,
+    ) -> Result<(), String> {
+        crate::validate::validate_iface_name(interface)?;
+        run_privileged(linux_teardown_commands(
+            interface,
+            allowed_ips,
+            dns,
+            ipv6_blackhole,
+        ))
+    }
+
+    fn push_route(cmds: &mut Vec<Vec<String>>, prefix: &str, interface: &str) {
+        cmds.push(vec![
+            "ip".into(),
+            "route".into(),
+            "add".into(),
+            prefix.into(),
+            "dev".into(),
+            interface.into(),
+        ]);
+    }
+
+    fn push_route_del(cmds: &mut Vec<Vec<String>>, prefix: &str, interface: &str) {
+        cmds.push(vec![
+            "ip".into(),
+            "route".into(),
+            "del".into(),
+            prefix.into(),
+            "dev".into(),
+            interface.into(),
+        ]);
+    }
+
+    pub(crate) fn linux_setup_commands(
+        interface: &str,
+        iface_cfg: &IfaceConfig<'_>,
+        allowed_ips: &[String],
+        peer_endpoint_ip: &str,
+        gateway: Option<&str>,
+    ) -> Vec<Vec<String>> {
+        let mut cmds = Vec::new();
         cmds.push(vec![
             "ip".into(),
             "addr".into(),
@@ -203,59 +272,176 @@ mod platform {
             iface_cfg.mtu.to_string(),
             "up".into(),
         ]);
-
         if let Some((addr6, plen6)) = iface_cfg.addr6 {
             cmds.push(vec![
                 "ip".into(),
                 "addr".into(),
                 "add".into(),
-                format!("{}/{}", addr6, plen6),
+                format!("{addr6}/{plen6}"),
                 "dev".into(),
                 interface.to_string(),
             ]);
         }
-
-        let gw_raw = default_gateway();
-        if let Some(ref gw) = gw_raw {
-            cmds.push(vec!["ip".into(), "route".into(), "add".into(), peer_endpoint_ip.to_string(), "via".into(), gw.clone()]);
-        }
-
-        for cidr in allowed_ips.iter().filter(|c| !c.contains(':')) {
-            cmds.push(vec!["ip".into(), "route".into(), "add".into(), cidr.clone(), "dev".into(), interface.to_string()]);
-        }
-
-        run_privileged(cmds)?;
-
-        if !dns.is_empty() {
-            let v4: Vec<String> = dns.iter().filter(|d| !d.contains(':')).cloned().collect();
-            if !v4.is_empty() {
-                let mut args = vec!["resolvectl".into(), "dns".into(), interface.to_string()];
-                args.extend(v4);
-                let _ = run_privileged(vec![args]);
+        if crate::validate::is_ip_address(peer_endpoint_ip) {
+            if let Some(gw) = gateway.filter(|gw| crate::validate::is_ip_address(gw)) {
+                cmds.push(vec![
+                    "ip".into(),
+                    "route".into(),
+                    "add".into(),
+                    peer_endpoint_ip.into(),
+                    "via".into(),
+                    gw.into(),
+                ]);
             }
         }
-
-        Ok(())
+        for cidr in allowed_ips.iter().filter(|c| !c.contains(':')) {
+            if cidr == "0.0.0.0/0" || cidr == "0/0" {
+                push_route(&mut cmds, "0.0.0.0/1", interface);
+                push_route(&mut cmds, "128.0.0.0/1", interface);
+            } else {
+                push_route(&mut cmds, cidr, interface);
+            }
+        }
+        if iface_cfg.addr6.is_some() {
+            for cidr in allowed_ips.iter().filter(|c| c.contains(':')) {
+                if cidr == "::/0" {
+                    push_route(&mut cmds, "::/1", interface);
+                    push_route(&mut cmds, "8000::/1", interface);
+                } else {
+                    push_route(&mut cmds, cidr, interface);
+                }
+            }
+        } else if crate::validate::should_block_native_ipv6(false, allowed_ips) {
+            push_route(&mut cmds, "::/1", interface);
+            push_route(&mut cmds, "8000::/1", interface);
+        }
+        cmds
     }
 
-    pub fn teardown(
+    pub(crate) fn linux_teardown_commands(
         interface: &str,
         allowed_ips: &[String],
         dns: &[String],
-    ) -> Result<(), String> {
-        let mut cmds: Vec<Vec<String>> = vec![];
-
+        ipv6_blackhole: bool,
+    ) -> Vec<Vec<String>> {
+        let mut cmds = Vec::new();
         for cidr in allowed_ips.iter().filter(|c| !c.contains(':')) {
-            cmds.push(vec!["ip".into(), "route".into(), "del".into(), cidr.clone(), "dev".into(), interface.to_string()]);
+            if cidr == "0.0.0.0/0" || cidr == "0/0" {
+                push_route_del(&mut cmds, "0.0.0.0/1", interface);
+                push_route_del(&mut cmds, "128.0.0.0/1", interface);
+            } else {
+                push_route_del(&mut cmds, cidr, interface);
+            }
         }
-
-        cmds.push(vec!["ip".into(), "link".into(), "set".into(), interface.to_string(), "down".into()]);
-
+        if ipv6_blackhole {
+            push_route_del(&mut cmds, "::/1", interface);
+            push_route_del(&mut cmds, "8000::/1", interface);
+        } else {
+            for cidr in allowed_ips.iter().filter(|c| c.contains(':')) {
+                if cidr == "::/0" {
+                    push_route_del(&mut cmds, "::/1", interface);
+                    push_route_del(&mut cmds, "8000::/1", interface);
+                } else {
+                    push_route_del(&mut cmds, cidr, interface);
+                }
+            }
+        }
+        cmds.push(vec![
+            "ip".into(),
+            "link".into(),
+            "set".into(),
+            interface.to_string(),
+            "down".into(),
+        ]);
         if !dns.is_empty() {
-            cmds.push(vec!["resolvectl".into(), "revert".into(), interface.to_string()]);
+            cmds.push(vec![
+                "resolvectl".into(),
+                "revert".into(),
+                interface.to_string(),
+            ]);
+        }
+        cmds
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::super::IfaceConfig;
+        use super::*;
+
+        fn cfg<'a>(addr6: Option<(&'a str, u8)>) -> IfaceConfig<'a> {
+            IfaceConfig {
+                addr: "10.0.0.2",
+                prefix_len: 32,
+                addr6,
+                mtu: 1420,
+            }
         }
 
-        run_privileged(cmds)
+        fn flat(cmds: &[Vec<String>]) -> Vec<String> {
+            cmds.iter().map(|cmd| cmd.join(" ")).collect()
+        }
+
+        #[test]
+        fn full_tunnel_splits_defaults_and_blackholes_ipv6() {
+            let allowed = vec!["0.0.0.0/0".to_string(), "::/0".to_string()];
+            let cmds = flat(&linux_setup_commands(
+                "tun0",
+                &cfg(None),
+                &allowed,
+                "203.0.113.10",
+                Some("192.0.2.1"),
+            ));
+            assert!(cmds
+                .iter()
+                .any(|c| c == "ip route add 203.0.113.10 via 192.0.2.1"));
+            assert!(cmds.iter().any(|c| c == "ip route add 0.0.0.0/1 dev tun0"));
+            assert!(cmds
+                .iter()
+                .any(|c| c == "ip route add 128.0.0.0/1 dev tun0"));
+            assert!(cmds.iter().any(|c| c == "ip route add ::/1 dev tun0"));
+            assert!(cmds.iter().any(|c| c == "ip route add 8000::/1 dev tun0"));
+            assert!(cmds.iter().all(|c| !c.contains("0.0.0.0/0")));
+        }
+
+        #[test]
+        fn split_tunnel_does_not_blackhole_ipv6() {
+            let allowed = vec!["10.8.0.0/24".to_string()];
+            let cmds = flat(&linux_setup_commands(
+                "tun0",
+                &cfg(None),
+                &allowed,
+                "203.0.113.10",
+                Some("not a gateway"),
+            ));
+            assert!(cmds
+                .iter()
+                .any(|c| c == "ip route add 10.8.0.0/24 dev tun0"));
+            assert!(cmds.iter().all(|c| !c.contains("::/1")));
+            assert!(cmds.iter().all(|c| !c.contains("not a gateway")));
+        }
+
+        #[test]
+        fn ipv6_address_routes_allowed_prefixes() {
+            let allowed = vec!["0.0.0.0/0".to_string(), "fd00::/64".to_string()];
+            let cmds = flat(&linux_setup_commands(
+                "tun0",
+                &cfg(Some(("fd00::2", 128))),
+                &allowed,
+                "203.0.113.10",
+                None,
+            ));
+            assert!(cmds.iter().any(|c| c == "ip addr add fd00::2/128 dev tun0"));
+            assert!(cmds.iter().any(|c| c == "ip route add fd00::/64 dev tun0"));
+            assert!(cmds.iter().all(|c| !c.contains("::/1")));
+        }
+
+        #[test]
+        fn teardown_removes_the_blackhole() {
+            let allowed = vec!["0.0.0.0/0".to_string()];
+            let cmds = flat(&linux_teardown_commands("tun0", &allowed, &[], true));
+            assert!(cmds.iter().any(|c| c == "ip route del ::/1 dev tun0"));
+            assert!(cmds.iter().any(|c| c == "ip route del 0.0.0.0/1 dev tun0"));
+        }
     }
 
     fn default_gateway() -> Option<String> {
@@ -264,7 +450,10 @@ mod platform {
             .output()
             .ok()?;
         let s = String::from_utf8_lossy(&out.stdout);
-        s.split_whitespace().skip_while(|t| *t != "via").nth(1).map(str::to_string)
+        s.split_whitespace()
+            .skip_while(|t| *t != "via")
+            .nth(1)
+            .map(str::to_string)
     }
 
     fn run_privileged(cmds: Vec<Vec<String>>) -> Result<(), String> {
@@ -310,87 +499,187 @@ mod platform {
         let netmask = cidr_to_netmask(iface_cfg.prefix_len);
 
         // Set IP and MTU
-        run_cmd("netsh", &[
-            "interface", "ipv4", "set", "address",
-            &format!("name={}", interface),
-            "static", iface_cfg.addr, &netmask,
-            "gateway=none",
-        ])?;
+        run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv4",
+                "set",
+                "address",
+                &format!("name={}", interface),
+                "static",
+                iface_cfg.addr,
+                &netmask,
+                "gateway=none",
+            ],
+        )?;
 
-        run_cmd("netsh", &[
-            "interface", "ipv4", "set", "subinterface",
-            interface,
-            &format!("mtu={}", iface_cfg.mtu),
-            "store=active",
-        ])?;
+        run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv4",
+                "set",
+                "subinterface",
+                interface,
+                &format!("mtu={}", iface_cfg.mtu),
+                "store=active",
+            ],
+        )?;
 
         // Set interface metric to 1 to ensure it's preferred
-        run_cmd("netsh", &[
-            "interface", "ipv4", "set", "interface",
-            interface,
-            "metric=1",
-        ])?;
+        run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv4",
+                "set",
+                "interface",
+                interface,
+                "metric=1",
+            ],
+        )?;
 
-        run_cmd("netsh", &[
-            "interface", "ipv6", "set", "interface",
-            interface,
-            "metric=1",
-        ])?;
+        run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv6",
+                "set",
+                "interface",
+                interface,
+                "metric=1",
+            ],
+        )?;
 
         // Get interface index for precise routing
         let if_index = get_interface_index(interface)?;
 
         // Route peer endpoint via original gateway
-        if let Some(gw) = default_gateway() {
-            let _ = run_cmd("route", &[
-                "ADD", peer_endpoint_ip, "MASK", "255.255.255.255", &gw, "METRIC", "1",
-            ]);
+        if let Some(gw) = default_gateway().filter(|gw| crate::validate::is_ip_address(gw)) {
+            let _ = run_cmd(
+                "route",
+                &[
+                    "ADD",
+                    peer_endpoint_ip,
+                    "MASK",
+                    "255.255.255.255",
+                    &gw,
+                    "METRIC",
+                    "1",
+                ],
+            );
         }
 
         // Add tunnel routes
         for cidr in allowed_ips.iter().filter(|c| !c.contains(':')) {
             if cidr == "0.0.0.0/0" || cidr == "0/0" {
                 // Use the interface index (IF x) and the interface's own IP as gateway
-                let _ = run_cmd("route", &["ADD", "0.0.0.0", "MASK", "128.0.0.0", iface_cfg.addr, "IF", &if_index]);
-                let _ = run_cmd("route", &["ADD", "128.0.0.0", "MASK", "128.0.0.0", iface_cfg.addr, "IF", &if_index]);
+                let _ = run_cmd(
+                    "route",
+                    &[
+                        "ADD",
+                        "0.0.0.0",
+                        "MASK",
+                        "128.0.0.0",
+                        iface_cfg.addr,
+                        "IF",
+                        &if_index,
+                    ],
+                );
+                let _ = run_cmd(
+                    "route",
+                    &[
+                        "ADD",
+                        "128.0.0.0",
+                        "MASK",
+                        "128.0.0.0",
+                        iface_cfg.addr,
+                        "IF",
+                        &if_index,
+                    ],
+                );
             } else {
                 let (net, prefix) = cidr.split_once('/').unwrap_or((cidr, "32"));
                 let mask = cidr_to_netmask(prefix.parse().unwrap_or(32));
-                let _ = run_cmd("route", &["ADD", net, "MASK", &mask, iface_cfg.addr, "IF", &if_index]);
+                let _ = run_cmd(
+                    "route",
+                    &["ADD", net, "MASK", &mask, iface_cfg.addr, "IF", &if_index],
+                );
             }
         }
 
         // DNS configuration
         if !dns.is_empty() {
-            let v4: Vec<&str> = dns.iter().filter(|d| !d.contains(':')).map(|s| s.as_str()).collect();
+            let v4: Vec<&str> = dns
+                .iter()
+                .filter(|d| !d.contains(':'))
+                .map(|s| s.as_str())
+                .collect();
             if !v4.is_empty() {
-                let _ = run_cmd("netsh", &[
-                    "interface", "ipv4", "set", "dnsservers",
-                    &format!("name={}", interface),
-                    "static", v4[0], "primary", "validate=no",
-                ]);
-                for extra in &v4[1..] {
-                    let _ = run_cmd("netsh", &[
-                        "interface", "ipv4", "add", "dnsservers",
+                let _ = run_cmd(
+                    "netsh",
+                    &[
+                        "interface",
+                        "ipv4",
+                        "set",
+                        "dnsservers",
                         &format!("name={}", interface),
-                        extra, "validate=no",
-                    ]);
+                        "static",
+                        v4[0],
+                        "primary",
+                        "validate=no",
+                    ],
+                );
+                for extra in &v4[1..] {
+                    let _ = run_cmd(
+                        "netsh",
+                        &[
+                            "interface",
+                            "ipv4",
+                            "add",
+                            "dnsservers",
+                            &format!("name={}", interface),
+                            extra,
+                            "validate=no",
+                        ],
+                    );
                 }
             }
-            
-            let v6: Vec<&str> = dns.iter().filter(|d| d.contains(':')).map(|s| s.as_str()).collect();
+
+            let v6: Vec<&str> = dns
+                .iter()
+                .filter(|d| d.contains(':'))
+                .map(|s| s.as_str())
+                .collect();
             if !v6.is_empty() {
-                let _ = run_cmd("netsh", &[
-                    "interface", "ipv6", "set", "dnsservers",
-                    &format!("name={}", interface),
-                    "static", v6[0], "primary", "validate=no",
-                ]);
-                for extra in &v6[1..] {
-                    let _ = run_cmd("netsh", &[
-                        "interface", "ipv6", "add", "dnsservers",
+                let _ = run_cmd(
+                    "netsh",
+                    &[
+                        "interface",
+                        "ipv6",
+                        "set",
+                        "dnsservers",
                         &format!("name={}", interface),
-                        extra, "validate=no",
-                    ]);
+                        "static",
+                        v6[0],
+                        "primary",
+                        "validate=no",
+                    ],
+                );
+                for extra in &v6[1..] {
+                    let _ = run_cmd(
+                        "netsh",
+                        &[
+                            "interface",
+                            "ipv6",
+                            "add",
+                            "dnsservers",
+                            &format!("name={}", interface),
+                            extra,
+                            "validate=no",
+                        ],
+                    );
                 }
             }
         }
@@ -398,12 +687,18 @@ mod platform {
         // IPv6 Handling & Leak Protection
         if let Some((addr6, plen6)) = iface_cfg.addr6 {
             // VPN supports IPv6: Configure it
-            let _ = run_cmd("netsh", &[
-                "interface", "ipv6", "set", "address",
-                &format!("name={}", interface),
-                &format!("{}/{}", addr6, plen6),
-                "store=active",
-            ]);
+            let _ = run_cmd(
+                "netsh",
+                &[
+                    "interface",
+                    "ipv6",
+                    "set",
+                    "address",
+                    &format!("name={}", interface),
+                    &format!("{}/{}", addr6, plen6),
+                    "store=active",
+                ],
+            );
 
             // Routing for IPv6
             for cidr6 in allowed_ips.iter().filter(|c| c.contains(':')) {
@@ -417,12 +712,18 @@ mod platform {
         } else {
             // VPN does NOT support IPv6: Block leaks by blackholing
             // Assign dummy address to make IPv6 stack active and routing work on this interface
-            let _ = run_cmd("netsh", &[
-                "interface", "ipv6", "set", "address",
-                &format!("name={}", interface),
-                "fd00:dead:beef:ffff::1/128",
-                "store=active",
-            ]);
+            let _ = run_cmd(
+                "netsh",
+                &[
+                    "interface",
+                    "ipv6",
+                    "set",
+                    "address",
+                    &format!("name={}", interface),
+                    "fd00:dead:beef:ffff::1/128",
+                    "store=active",
+                ],
+            );
 
             // Add routes via PowerShell with metric 0 (highest priority)
             let _ = run_ps(&format!("New-NetRoute -DestinationPrefix '::/1' -InterfaceIndex {} -NextHop '::' -RouteMetric 0 -ErrorAction SilentlyContinue", if_index));
@@ -436,6 +737,7 @@ mod platform {
         interface: &str,
         allowed_ips: &[String],
         _dns: &[String],
+        _ipv6_blackhole: bool,
     ) -> Result<(), String> {
         crate::validate::validate_iface_name(interface)?;
         // Remove IPv4 routes
@@ -459,16 +761,28 @@ mod platform {
             }
         }
 
-        let _ = run_cmd("netsh", &[
-            "interface", "ipv4", "set", "dnsservers",
-            &format!("name={}", interface),
-            "dhcp",
-        ]);
-        let _ = run_cmd("netsh", &[
-            "interface", "ipv6", "set", "dnsservers",
-            &format!("name={}", interface),
-            "dhcp",
-        ]);
+        let _ = run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv4",
+                "set",
+                "dnsservers",
+                &format!("name={}", interface),
+                "dhcp",
+            ],
+        );
+        let _ = run_cmd(
+            "netsh",
+            &[
+                "interface",
+                "ipv6",
+                "set",
+                "dnsservers",
+                &format!("name={}", interface),
+                "dhcp",
+            ],
+        );
         Ok(())
     }
 
@@ -488,17 +802,19 @@ mod platform {
         crate::validate::validate_iface_name(name)?;
         let out = std::process::Command::new("powershell")
             .args([
-                "-NoProfile", "-NonInteractive", "-Command",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
                 &format!("(Get-NetAdapter -Name '{}').InterfaceIndex", name),
             ])
             .output()
             .map_err(|e| e.to_string())?;
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if s.is_empty() {
-            Err(format!("Could not find interface index for {}", name))
-        } else {
-            Ok(s)
+            return Err(format!("Could not find interface index for {}", name));
         }
+        let index = crate::validate::parse_u32_token(&s)?;
+        Ok(index.to_string())
     }
 
     fn default_gateway() -> Option<String> {
@@ -510,7 +826,11 @@ mod platform {
             .output()
             .ok()?;
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 
     fn run_cmd(program: &str, args: &[&str]) -> Result<(), String> {
