@@ -56,7 +56,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCQTA3REU1QzYzMkMwOUQKUldTZHdETEc1WDJnTzR4cWNIWms1Z2NKejJzUlZUcGkzU0w5UVptYThVS0t2d2dPLy8vcEhFaUcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU3OTM4ODEwOTEzRUU2NzEKUldSeDVqNlJFSWlUVjB3b1g4WEcvTzJMOWJsTmtWcUtpZ0dBTnZ2MGtZc1V3aU1PY0Fnd2lwT2EK",
       "endpoints": [
         "https://github.com/wedima/wireguard-vpn-client/releases/latest/download/latest.json"
       ],

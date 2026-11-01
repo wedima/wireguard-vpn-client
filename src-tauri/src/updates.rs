@@ -26,7 +26,7 @@ pub const RELEASE_ENDPOINT: &str =
 /// Minisign public key compiled into the app. This is the base64 form Tauri
 /// stores in `tauri.conf.json`; the updater refuses to install unless a
 /// signature verifies against this exact key.
-pub const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCQTA3REU1QzYzMkMwOUQKUldTZHdETEc1WDJnTzR4cWNIWms1Z2NKejJzUlZUcGkzU0w5UVptYThVS0t2d2dPLy8vcEhFaUcK";
+pub const UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU3OTM4ODEwOTEzRUU2NzEKUldSeDVqNlJFSWlUVjB3b1g4WEcvTzJMOWJsTmtWcUtpZ0dBTnZ2MGtZc1V3aU1PY0Fnd2lwT2EK";
 
 const ALLOWED_HOSTS: &[&str] = &[
     "github.com",
@@ -359,6 +359,16 @@ mod tests {
         assert!(!parse_auto_update(Some("{}")));
         assert!(!parse_auto_update(Some(r#"{"auto_update":false}"#)));
         assert!(parse_auto_update(Some(r#"{"auto_update":true}"#)));
+    }
+
+    const RETIRED_UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCQTA3REU1QzYzMkMwOUQKUldTZHdETEc1WDJnTzR4cWNIWms1Z2NKejJzUlZUcGkzU0w5UVptYThVS0t2d2dPLy8vcEhFaUcK";
+
+    #[test]
+    fn retired_public_key_does_not_match_embedded_key() {
+        assert_ne!(UPDATE_PUBKEY, RETIRED_UPDATE_PUBKEY);
+        let retired_sig = include_str!("../update-fixtures/retired-payload.bin.sig");
+        let url = "https://github.com/wedima/wireguard-vpn-client/releases/download/v0.1.7/payload.bin";
+        assert!(authorize_update_install(url, retired_sig.trim(), FIXTURE, "0.1.7").is_err());
     }
 
     #[test]
