@@ -51,8 +51,7 @@ impl WgSession {
             peer.keepalive,
             0,
             None,
-        )
-        .map_err(|e| format!("Failed to create WireGuard tunnel: {}", e))?;
+        );
 
         let (device, interface_name) = create_tun_device()?;
 

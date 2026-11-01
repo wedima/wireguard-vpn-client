@@ -910,8 +910,7 @@ where
         peer.keepalive,
         0,
         None,
-    )
-    .map_err(|e| e.to_string())?;
+    );
 
     let udp = UdpSocket::bind("0.0.0.0:0")
         .await

@@ -27,11 +27,13 @@ node scripts/verify-artifact.mjs --kind dmg "$DMG"
 node scripts/verify-artifact.mjs --kind gzip "$TGZ"
 hdiutil verify "$DMG"
 
-if [[ -n "${APPLE_CERTIFICATE:-}${APPLE_SIGNING_IDENTITY:-}" ]]; then
+SIGNING_MODE="$(tr -d '[:space:]' < src-tauri/target/macos-code-signing.txt 2>/dev/null || true)"
+if [[ "$SIGNING_MODE" == "signed" ]]; then
   codesign --verify --deep --strict --verbose=2 "$APP"
   spctl --assess --type execute --verbose=4 "$APP"
+  echo "macOS bundle is signed"
 else
-  echo "::warning::Apple signing secrets are not set. The universal DMG is structurally valid but not notarized."
+  echo "::warning::This macOS artifact is unsigned. Replace GitHub Actions secrets APPLE_CERTIFICATE (base64 of a Developer ID PKCS#12 or a PEM bundle with the certificate and private key) and APPLE_CERTIFICATE_PASSWORD (the matching export password)."
 fi
 
 if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then

@@ -49,6 +49,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          source scripts/prepare-apple-signing.sh
           args=(tauri build --target universal-apple-darwin)
           if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
             args+=(--config src-tauri/tauri.updater.json)
