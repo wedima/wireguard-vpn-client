@@ -4,6 +4,9 @@ param(
   [string]$Arch
 )
 $ErrorActionPreference = "Stop"
+# pwsh does not stop the script when node exits non-zero unless this is set.
+# The previous NSIS check printed "PE machine is 0x14c" and the job still passed.
+$PSNativeCommandUseErrorActionPreference = $true
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
@@ -12,6 +15,14 @@ $Machine = if ($Arch -eq "x64") { "x64" } else { "arm64" }
 $Exe = Join-Path "src-tauri/target/$Target/release" "wedima-vpn-wg.exe"
 if (-not (Test-Path $Exe)) { throw "Missing $Exe" }
 
+function Invoke-NodeCheck {
+  param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+  & node @ArgumentList
+  if ($LASTEXITCODE -ne 0) {
+    throw "node $($ArgumentList -join ' ') exited $LASTEXITCODE"
+  }
+}
+
 $Proc = Start-Process -FilePath $Exe -ArgumentList "--version" -Wait -PassThru -WindowStyle Hidden
 if ($Proc.ExitCode -ne 0) { throw "Windows smoke test exited $($Proc.ExitCode)" }
 
@@ -19,8 +30,19 @@ $Nsis = Get-ChildItem "src-tauri/target/$Target/release/bundle/nsis/*.exe" | Sel
 $Msi = Get-ChildItem "src-tauri/target/$Target/release/bundle/msi/*.msi" | Select-Object -First 1
 if (-not $Nsis -or -not $Msi) { throw "NSIS or MSI installer was not produced" }
 
-node scripts/verify-artifact.mjs --kind pe --machine $Machine $Nsis.FullName
-node scripts/verify-artifact.mjs --kind msi $Msi.FullName
+# The app executable must be the target machine. A 32-bit file here fails the job.
+Invoke-NodeCheck @(
+  "scripts/verify-artifact.mjs", "--kind", "pe", "--machine", $Machine, $Exe
+)
+
+# NSIS ships a 32-bit stub (0x14c). Accept that only after the app exe matched.
+Invoke-NodeCheck @(
+  "scripts/verify-artifact.mjs", "--kind", "pe", "--machine", $Machine,
+  "--allow-i386-stub", $Nsis.FullName
+)
+Invoke-NodeCheck @(
+  "scripts/verify-artifact.mjs", "--kind", "msi", $Msi.FullName
+)
 
 $Dll = Join-Path "src-tauri/target/$Target/release" "wintun.dll"
 if (-not (Test-Path $Dll)) { throw "wintun.dll was not staged beside the executable" }
@@ -39,7 +61,9 @@ if ($env:WINDOWS_CERTIFICATE) {
 if ($env:TAURI_SIGNING_PRIVATE_KEY) {
   $Sig = Get-ChildItem "src-tauri/target/$Target/release/bundle/nsis/*.exe.sig" | Select-Object -First 1
   if (-not $Sig) { throw "Updater signature is missing" }
-  node scripts/verify-artifact.mjs --kind sig $Sig.FullName
+  Invoke-NodeCheck @(
+    "scripts/verify-artifact.mjs", "--kind", "sig", $Sig.FullName
+  )
 } else {
   Write-Host "::warning::TAURI_SIGNING_PRIVATE_KEY is not set. Updater metadata will not be published."
 }

@@ -19,7 +19,25 @@ test("accepts an x64 and an arm64 PE", () => {
 
 test("rejects the wrong PE architecture", () => {
   assert.throws(() => verifyArtifact("pe", pe(0x8664), { machine: 0xaa64 }), /machine/);
+  assert.throws(() => verifyArtifact("pe", pe(0x14c), { machine: 0x8664 }), /0x14c/);
+  assert.throws(() => verifyArtifact("pe", pe(0x14c), { machine: 0xaa64 }), /0x14c/);
   assert.throws(() => verifyArtifact("pe", Buffer.from("not a pe")), /MZ/);
+});
+
+test("accepts a 32-bit NSIS stub only when that exception is requested", () => {
+  const stub = verifyArtifact("pe", pe(0x14c), { machine: 0x8664, allowI386Stub: true });
+  assert.equal(stub.machine, 0x14c);
+  assert.equal(stub.i386Stub, true);
+  const armStub = verifyArtifact("pe", pe(0x14c), { machine: 0xaa64, allowI386Stub: true });
+  assert.equal(armStub.machine, 0x14c);
+  assert.equal(
+    verifyArtifact("pe", pe(0x8664), { machine: 0x8664, allowI386Stub: true }).machine,
+    0x8664
+  );
+  assert.throws(
+    () => verifyArtifact("pe", pe(0xaa64), { machine: 0x8664, allowI386Stub: true }),
+    /0xaa64/
+  );
 });
 
 test("accepts an AppImage magic", () => {

@@ -96,7 +96,7 @@ Output: `src-tauri/target/universal-apple-darwin/release/bundle/`
 Jeder Plattform-Job bricht ab, wenn das Paket strukturell ungültig ist:
 
 - macOS: universelles Binary (`lipo` enthält x86_64 und arm64), `--version` antwortet, Bundle-ID stimmt, DMG-Trailer und `hdiutil verify`
-- Windows: `--version` startet die EXE, NSIS ist ein PE der richtigen Architektur, MSI hat einen OLE-Header, `wintun.dll` liegt neben der EXE
+- Windows: `--version` startet `wedima-vpn-wg.exe`, und diese Datei muss Maschine `0x8664` (x64) oder `0xaa64` (ARM64) sein. Der NSIS-Installer darf ein 32-bit-Stub (`0x14c`) sein, aber nur wenn die App-EXE selbst die richtige Maschine hat. MSI hat einen OLE-Header, `wintun.dll` liegt neben der EXE
 - Der Release-Job prüft die hochgeladenen Dateien noch einmal und legt `latest.json` **nur** an, wenn jede Updater-Datei eine Minisign-Signatur hat
 
 Ohne die Signatur-Secrets bleiben die Installer veröffentlicht, aber es gibt kein `latest.json`. Die App installiert dann kein Update.

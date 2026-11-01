@@ -14,7 +14,7 @@ export function verifyArtifact(kind, bytes, options = {}) {
   }
   switch (kind) {
     case "pe":
-      return verifyPe(bytes, options.machine);
+      return verifyPe(bytes, options.machine, options.allowI386Stub);
     case "msi":
       return verifyMsi(bytes);
     case "dmg":
@@ -30,7 +30,7 @@ export function verifyArtifact(kind, bytes, options = {}) {
   }
 }
 
-function verifyPe(bytes, machine) {
+function verifyPe(bytes, machine, allowI386Stub = false) {
   if (bytes[0] !== 0x4d || bytes[1] !== 0x5a) {
     throw new Error("Not a Windows PE executable (missing MZ header)");
   }
@@ -45,12 +45,13 @@ function verifyPe(bytes, machine) {
     throw new Error("Not a Windows PE executable (missing PE signature)");
   }
   const actual = bytes.readUInt16LE(peOffset + 4);
-  if (machine != null && actual !== machine) {
+  const i386Stub = actual === 0x14c;
+  if (machine != null && actual !== machine && !(allowI386Stub && i386Stub)) {
     throw new Error(
       `PE machine is 0x${actual.toString(16)} but expected 0x${machine.toString(16)}`
     );
   }
-  return { machine: actual };
+  return { machine: actual, i386Stub };
 }
 
 function verifyMsi(bytes) {
@@ -132,6 +133,8 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === "--kind" || arg === "--machine") {
       options[arg.slice(2)] = argv[++i];
+    } else if (arg === "--allow-i386-stub") {
+      options.allowI386Stub = true;
     } else {
       options._.push(arg);
     }
@@ -144,7 +147,9 @@ if (isMain) {
   const args = parseArgs(process.argv.slice(2));
   const file = args._[0];
   if (!args.kind || !file) {
-    console.error("Usage: verify-artifact.mjs --kind <pe|msi|dmg|gzip|sig> [--machine <x64|arm64>] <file>");
+    console.error(
+      "Usage: verify-artifact.mjs --kind <pe|msi|dmg|gzip|sig|appimage> [--machine <x64|arm64>] [--allow-i386-stub] <file>"
+    );
     process.exit(2);
   }
   const bytes = readFileSync(file);
@@ -153,6 +158,12 @@ if (isMain) {
     console.error(`Unknown machine ${args.machine}`);
     process.exit(2);
   }
-  verifyArtifact(args.kind, bytes, { machine });
+  const result = verifyArtifact(args.kind, bytes, {
+    machine,
+    allowI386Stub: args.allowI386Stub === true,
+  });
+  if (args.kind === "pe") {
+    console.log(`pe machine 0x${result.machine.toString(16)} ${file}`);
+  }
   console.log(`ok ${args.kind} ${file}`);
 }
