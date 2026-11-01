@@ -22,6 +22,19 @@ test("rejects the wrong PE architecture", () => {
   assert.throws(() => verifyArtifact("pe", Buffer.from("not a pe")), /MZ/);
 });
 
+test("accepts an AppImage magic", () => {
+  const bytes = Buffer.alloc(16);
+  bytes[0] = 0x7f;
+  bytes[1] = 0x45;
+  bytes[2] = 0x4c;
+  bytes[3] = 0x46;
+  bytes[8] = 0x41;
+  bytes[9] = 0x49;
+  bytes[10] = 0x02;
+  verifyArtifact("appimage", bytes);
+  assert.throws(() => verifyArtifact("appimage", Buffer.from("not an appimage!!")), /ELF|AppImage/);
+});
+
 test("accepts msi, dmg, and gzip magics", () => {
   const msi = Buffer.alloc(16);
   msi.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);

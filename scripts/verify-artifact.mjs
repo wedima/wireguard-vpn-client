@@ -23,6 +23,8 @@ export function verifyArtifact(kind, bytes, options = {}) {
       return verifyGzip(bytes);
     case "sig":
       return verifySignature(bytes);
+    case "appimage":
+      return verifyAppImage(bytes);
     default:
       throw new Error(`Unknown artifact kind ${kind}`);
   }
@@ -66,6 +68,23 @@ function verifyDmg(bytes) {
   const tail = bytes.subarray(bytes.length - 512, bytes.length - 508);
   if (tail.toString("ascii") !== "koly") {
     throw new Error("Not a DMG (missing koly trailer)");
+  }
+  return {};
+}
+
+function verifyAppImage(bytes) {
+  if (
+    bytes.length < 11 ||
+    bytes[0] !== 0x7f ||
+    bytes[1] !== 0x45 ||
+    bytes[2] !== 0x4c ||
+    bytes[3] !== 0x46
+  ) {
+    throw new Error("Not an ELF executable");
+  }
+  // AppImage type 2 stores its magic inside the ELF identity padding.
+  if (bytes[8] !== 0x41 || bytes[9] !== 0x49 || bytes[10] !== 0x02) {
+    throw new Error("Not an AppImage (missing AI type-2 magic)");
   }
   return {};
 }

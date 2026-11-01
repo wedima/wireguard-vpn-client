@@ -42,6 +42,9 @@ Unter **GitHub → Actions → Release** läuft der Workflow mit drei parallelen
 | macOS Universal | `macos-latest` | `.dmg` (x64 + ARM64 in einem Binary) |
 | Windows x64 | `windows-latest` | `.exe` + `.msi` |
 | Windows ARM64 | `windows-11-arm` | `.exe` + `.msi` |
+| Linux AppImage | `ubuntu-latest` | `.AppImage` (the portable Linux package) |
+
+Ein Push auf den Arbeitsbranch startet dieselben Build-Jobs ohne ein `v*`-Tag und ohne GitHub Release. Ein Release wird nur bei einem Tag `v*` erstellt.
 
 Nach Abschluss aller drei Jobs wird automatisch ein **GitHub Release** mit allen Dateien erstellt.
 
