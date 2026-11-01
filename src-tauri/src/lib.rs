@@ -112,6 +112,10 @@ pub fn run() {
                 }
             }
 
+            // A saved auto-update preference is left as the user set it.
+            // Startup still installs only a signed release from this repository.
+            updates::spawn_startup_update(app.handle());
+
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -1,10 +1,10 @@
-//! Opt-in updates from this repository's GitHub releases.
+//! Updates from this repository's GitHub releases.
 //!
-//! The Tauri updater downloads the artifact and checks its minisign signature
-//! against the key compiled into the app before it installs anything. This
-//! module additionally refuses non-HTTPS URLs, empty signatures, and hosts
-//! other than GitHub's release hosts. Automatic checks run only when the user
-//! turns them on.
+//! Startup always checks for an update and installs one only after the
+//! download URL is HTTPS on this repository's release hosts and the bytes
+//! verify with the minisign key compiled into the app. The saved auto-update
+//! preference is not read or written by that path. A missing manifest or a
+//! bad signature installs nothing.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -221,6 +221,23 @@ pub fn set_auto_update(app: tauri::AppHandle, enabled: bool) -> Result<(), Strin
 #[tauri::command]
 pub fn get_update_status() -> Option<UpdateReport> {
     LAST_REPORT.lock().ok().and_then(|slot| slot.clone())
+}
+
+/// Check this repository's release and install it when the signature is valid.
+/// Does not read or write `update-settings.json`.
+pub fn spawn_startup_update(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let report = match download_verified_update(&app).await {
+            Ok(report) => report,
+            Err(message) => UpdateReport {
+                status: "error".into(),
+                version: None,
+                message,
+            },
+        };
+        remember(report);
+    });
 }
 
 #[tauri::command]

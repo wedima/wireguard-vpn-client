@@ -39,11 +39,6 @@ function AppContent() {
 
   useEffect(() => {
     refresh();
-    invoke<boolean>("get_auto_update")
-      .then((enabled) => {
-        if (enabled) return invoke("check_for_update");
-      })
-      .catch(() => {});
   }, []);
 
   if (screen === "loading") {

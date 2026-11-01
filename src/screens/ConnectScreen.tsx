@@ -79,12 +79,24 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
   const chartRef = useRef<SVGSVGElement | null>(null);
 
   useEffect(() => {
+    let stopped = false;
     invoke<boolean>("get_auto_update").then(setAutoUpdate).catch(() => {});
-    invoke<{ status: string; version: string | null; message: string } | null>("get_update_status")
-      .then((report) => {
-        if (report?.message && report.status !== "error") setUpdateNotice(report.message);
-      })
-      .catch(() => {});
+    const readStatus = () => {
+      invoke<{ status: string; version: string | null; message: string } | null>("get_update_status")
+        .then((report) => {
+          if (stopped || !report?.message || report.status === "error") return;
+          setUpdateNotice(report.message);
+        })
+        .catch(() => {});
+    };
+    readStatus();
+    const timer = window.setInterval(readStatus, 3000);
+    const stop = window.setTimeout(() => window.clearInterval(timer), 30000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.clearTimeout(stop);
+    };
   }, []);
 
   useEffect(() => {
