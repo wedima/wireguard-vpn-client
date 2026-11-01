@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Eye, EyeOff, Loader2, Settings2, Wifi, WifiOff,
-  Trash2, Wrench, LogOut,
+  Trash2, Wrench, LogOut, Check, RefreshCw,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import wedimaLogo from "../assets/wedima-logo.svg";
@@ -68,6 +68,8 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [autoUpdate, setAutoUpdate] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showUninstallConfirm, setShowUninstallConfirm] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -75,6 +77,27 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
   const [hoveredPointIndex, setHoveredPointIndex] = useState<number | null>(null);
   const previousSampleRef = useRef<{ bytesTx: number; bytesRx: number; timestamp: number } | null>(null);
   const chartRef = useRef<SVGSVGElement | null>(null);
+
+  useEffect(() => {
+    let stopped = false;
+    invoke<boolean>("get_auto_update").then(setAutoUpdate).catch(() => {});
+    const readStatus = () => {
+      invoke<{ status: string; version: string | null; message: string } | null>("get_update_status")
+        .then((report) => {
+          if (stopped || !report?.message || report.status === "error") return;
+          setUpdateNotice(report.message);
+        })
+        .catch(() => {});
+    };
+    readStatus();
+    const timer = window.setInterval(readStatus, 3000);
+    const stop = window.setTimeout(() => window.clearInterval(timer), 30000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.clearTimeout(stop);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isConnected) {
@@ -210,6 +233,36 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
     await onReset();
   };
 
+  const handleToggleAutoUpdate = async () => {
+    const next = !autoUpdate;
+    setAutoUpdate(next);
+    setError(null);
+    try {
+      await invoke("set_auto_update", { enabled: next });
+      if (next) {
+        const report = await invoke<{ message: string }>("check_for_update");
+        setUpdateNotice(report.message);
+      } else {
+        setUpdateNotice(null);
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleCheckUpdates = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const report = await invoke<{ message: string }>("check_for_update");
+      setUpdateNotice(report.message);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleUninstallHelper = async () => {
     setShowUninstallConfirm(false);
     setLoading(true);
@@ -242,6 +295,15 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={handleToggleAutoUpdate}>
+                <Check className={`h-4 w-4 shrink-0 ${autoUpdate ? "opacity-100" : "opacity-0"}`} />
+                {t("connect.autoUpdate")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleCheckUpdates}>
+                <RefreshCw className="h-4 w-4 shrink-0" />
+                {t("connect.checkForUpdates")}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuDestructiveItem onClick={() => setShowDeleteConfirm(true)}>
                 <Trash2 className="h-4 w-4 shrink-0" />
                 {t("connect.deleteConnection")}
@@ -434,6 +496,12 @@ export default function ConnectScreen({ isConnected, connectionName, onStatusCha
                 </Button>
               </div>
             </div>
+          )}
+
+          {updateNotice && !error && (
+            <Alert variant="info" className="mb-4">
+              <AlertDescription>{updateNotice}</AlertDescription>
+            </Alert>
           )}
 
           {error && (

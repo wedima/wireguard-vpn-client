@@ -45,6 +45,9 @@ Icon?
 # Sensitive / runtime
 *.enc
 config.enc
+*.updater.key
+*.updater.key.pub
 
 # Local release artifacts
 releases/
+dist-release/

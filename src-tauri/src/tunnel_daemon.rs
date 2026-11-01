@@ -17,20 +17,13 @@ use tokio::net::UnixListener;
 #[cfg(target_os = "windows")]
 use tokio::net::windows::named_pipe::NamedPipeServer;
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::Security::{
-    InitializeSecurityDescriptor, SetSecurityDescriptorDacl, PSECURITY_DESCRIPTOR,
-    SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-};
+use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Pipes::{
-    CreateNamedPipeW,
-    PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX};
-
-#[cfg(target_os = "windows")]
-const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -48,7 +41,16 @@ pub const SOCKET_PATH: &str = "/var/run/com.wedima.vpn.wg.helper.sock";
 #[cfg(target_os = "windows")]
 pub const PIPE_NAME: &str = r"\\.\pipe\com.wedima.vpn.wg.helper";
 
+#[cfg(target_os = "macos")]
+pub const UID_FILE: &str = "/Library/PrivilegedHelperTools/com.wedima.vpn.wg.helper.uid";
+#[cfg(target_os = "macos")]
+pub const VERSION_FILE: &str = "/Library/PrivilegedHelperTools/com.wedima.vpn.wg.helper.version";
+#[cfg(target_os = "macos")]
+pub const CLIENT_FILE: &str = "/Library/PrivilegedHelperTools/com.wedima.vpn.wg.helper.client";
+
 pub const HELPER_LABEL: &str = "com.wedima.vpn.wg.helper";
+
+const MAX_COMMAND_BYTES: usize = 400_000;
 #[cfg(target_os = "macos")]
 pub const HELPER_DEST: &str = "/Library/PrivilegedHelperTools/com.wedima.vpn.wg.helper";
 #[cfg(target_os = "macos")]
@@ -255,14 +257,15 @@ fn setup_routing(iface: &str, peer_ip: &str, allowed_ips: &[String], has_ipv6_tu
 
 #[cfg(target_os = "macos")]
 fn setup_dns(dns: &[String]) {
-    let all: Vec<&str> = dns.iter().map(|s| s.as_str()).collect();
-    if all.is_empty() {
+    if dns.is_empty() {
         return;
     }
-    let list = all.join(" ");
     for svc in network_services() {
+        let mut args = vec!["-setdnsservers".to_string(), svc];
+        args.extend(dns.iter().cloned());
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let _ = std::process::Command::new("networksetup")
-            .args(["-setdnsservers", &svc, &list])
+            .args(&arg_refs)
             .status();
     }
 }
@@ -390,21 +393,156 @@ pub fn run_daemon() {
 }
 
 #[cfg(target_os = "macos")]
-async fn daemon_loop() {
-    let _ = std::fs::remove_file(SOCKET_PATH);
-    let listener = UnixListener::bind(SOCKET_PATH).expect("bind helper socket");
+struct HelperGate {
+    uid: u32,
+    client_path: std::path::PathBuf,
+    team_id: Option<String>,
+}
 
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(
-        SOCKET_PATH,
-        std::fs::Permissions::from_mode(0o777),
-    );
+#[cfg(target_os = "macos")]
+impl HelperGate {
+    fn load() -> Result<Self, String> {
+        let uid: u32 = std::fs::read_to_string(UID_FILE)
+            .map_err(|_| "helper identity file is missing".to_string())?
+            .trim()
+            .parse()
+            .map_err(|_| "helper identity file is invalid".to_string())?;
+        let client_path = std::fs::read_to_string(CLIENT_FILE)
+            .map_err(|_| "helper client path is missing".to_string())?;
+        let client_path = std::path::PathBuf::from(client_path.trim_end_matches(['\n', '\r']));
+        let team_id = team_id_of(&client_path);
+        Ok(Self {
+            uid,
+            client_path,
+            team_id,
+        })
+    }
+
+    fn allows(&self, stream: &tokio::net::UnixStream) -> bool {
+        use std::os::fd::AsRawFd;
+        let fd = stream.as_raw_fd();
+        // getpeereid, not tokio's UCred fields: those fields are private on macOS.
+        let Some(peer_uid) = peer_uid(fd) else {
+            return false;
+        };
+        if peer_uid != self.uid {
+            return false;
+        }
+        let Ok(peer) = peer_executable(fd) else {
+            return false;
+        };
+        if let Some(expected) = &self.team_id {
+            return team_id_of(&peer).as_ref() == Some(expected);
+        }
+        paths_equal(&peer, &self.client_path)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn peer_uid(fd: i32) -> Option<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+    if rc == 0 {
+        Some(uid)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn peer_executable(fd: i32) -> Result<std::path::PathBuf, ()> {
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            0, // SOL_LOCAL
+            2, // LOCAL_PEERPID
+            &mut pid as *mut libc::pid_t as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(());
+    }
+    let mut buf = [0i8; 4096];
+    let n = unsafe { proc_pidpath(pid, buf.as_mut_ptr(), buf.len() as u32) };
+    if n <= 0 {
+        return Err(());
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n as usize) };
+    let path = String::from_utf8_lossy(bytes).trim_end_matches('\0').to_string();
+    Ok(std::path::PathBuf::from(path))
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "proc")]
+extern "C" {
+    fn proc_pidpath(pid: i32, buffer: *mut libc::c_char, buffersize: u32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn team_id_of(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stderr);
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("TeamIdentifier=") else {
+            continue;
+        };
+        let team = rest.trim();
+        if !team.is_empty() && team != "not set" {
+            return Some(team.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => left == right,
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn daemon_loop() {
+    let gate = match HelperGate::load() {
+        Ok(gate) => gate,
+        Err(err) => {
+            eprintln!("helper refused to start: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    let _ = std::fs::remove_file(SOCKET_PATH);
+    let old_mask = unsafe { libc::umask(0o077) };
+    let listener = UnixListener::bind(SOCKET_PATH).expect("bind helper socket");
+    unsafe { libc::umask(old_mask) };
+
+    use std::os::unix::fs::{chown, PermissionsExt};
+    if chown(SOCKET_PATH, Some(gate.uid), None).is_err()
+        || std::fs::set_permissions(SOCKET_PATH, std::fs::Permissions::from_mode(0o600)).is_err()
+    {
+        eprintln!("helper could not restrict its socket");
+        std::process::exit(1);
+    }
 
     let bytes_tx = Arc::new(AtomicU64::new(0));
     let bytes_rx = Arc::new(AtomicU64::new(0));
+    let gate = Arc::new(gate);
 
     loop {
         if let Ok((stream, _)) = listener.accept().await {
+            if !gate.allows(&stream) {
+                eprintln!("helper rejected a connection");
+                continue;
+            }
             let btx = Arc::clone(&bytes_tx);
             let brx = Arc::clone(&bytes_rx);
             tokio::spawn(async move {
@@ -416,32 +554,37 @@ async fn daemon_loop() {
 }
 
 #[cfg(target_os = "windows")]
-fn create_wide_open_pipe(pipe_name: &str, first: bool) -> Result<NamedPipeServer, String> {
+fn create_restricted_pipe(pipe_name: &str, first: bool) -> Result<NamedPipeServer, String> {
     use std::os::windows::ffi::OsStrExt;
     let wide_name: Vec<u16> = std::ffi::OsStr::new(pipe_name)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
 
-    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let sid = read_reg_sz("AllowedUserSid").ok_or("helper user is not registered")?;
+    if !crate::validate::is_windows_sid(&sid) {
+        return Err("helper user registration is invalid".into());
+    }
+    let sddl = format!("D:(A;;GA;;;SY)(A;;GRGW;;;{sid})");
+    let sddl_wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut sd_ptr: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let mut sa: SECURITY_ATTRIBUTES = unsafe { std::mem::zeroed() };
 
     unsafe {
-        if InitializeSecurityDescriptor(
-            &mut sd as *mut _ as PSECURITY_DESCRIPTOR,
-            SECURITY_DESCRIPTOR_REVISION,
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            1,
+            &mut sd_ptr,
+            std::ptr::null_mut(),
         ) == 0
         {
-            return Err("InitializeSecurityDescriptor failed".into());
-        }
-
-        // Set NULL DACL (allows everyone access)
-        if SetSecurityDescriptorDacl(&mut sd as *mut _ as PSECURITY_DESCRIPTOR, 1, std::ptr::null(), 0) == 0 {
-            return Err("SetSecurityDescriptorDacl failed".into());
+            return Err("security descriptor failed".into());
         }
 
         sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
-        sa.lpSecurityDescriptor = &mut sd as *mut _ as *mut _;
+        sa.lpSecurityDescriptor = sd_ptr;
         sa.bInheritHandle = 0;
 
         let mut access = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
@@ -452,7 +595,7 @@ fn create_wide_open_pipe(pipe_name: &str, first: bool) -> Result<NamedPipeServer
         let handle = CreateNamedPipeW(
             wide_name.as_ptr(),
             access,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             255,   // max instances
             65536, // out buffer
             65536, // in buffer
@@ -461,9 +604,12 @@ fn create_wide_open_pipe(pipe_name: &str, first: bool) -> Result<NamedPipeServer
         );
 
         if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            LocalFree(sd_ptr as windows_sys::Win32::Foundation::HLOCAL);
             return Err(format!("CreateNamedPipeW failed: {}", std::io::Error::last_os_error()));
         }
+        LocalFree(sd_ptr as windows_sys::Win32::Foundation::HLOCAL);
 
+        use std::os::windows::io::FromRawHandle;
         Ok(NamedPipeServer::from_raw_handle(handle as *mut _).map_err(|e| e.to_string())?)
     }
 }
@@ -475,7 +621,7 @@ async fn daemon_loop() {
     let mut first = true;
 
     loop {
-        let server = match create_wide_open_pipe(PIPE_NAME, first) {
+        let server = match create_restricted_pipe(PIPE_NAME, first) {
             Ok(s) => s,
             Err(_e) => {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -485,6 +631,11 @@ async fn daemon_loop() {
         first = false;
 
         if server.connect().await.is_ok() {
+            use std::os::windows::io::AsRawHandle;
+            if ensure_pipe_peer_is_helper(server.as_raw_handle(), false).is_err() {
+                eprintln!("helper rejected a connection");
+                continue;
+            }
             let btx = Arc::clone(&bytes_tx);
             let brx = Arc::clone(&bytes_rx);
             tokio::spawn(async move {
@@ -493,6 +644,76 @@ async fn daemon_loop() {
             });
         }
     }
+}
+
+struct ActiveTunnel {
+    iface: String,
+    stop_tx: broadcast::Sender<()>,
+    allowed_ips: Vec<String>,
+    dns: Vec<String>,
+    ipv6_kill_switched: bool,
+}
+
+fn active_tunnel() -> &'static std::sync::Mutex<Option<ActiveTunnel>> {
+    static ACTIVE: std::sync::OnceLock<std::sync::Mutex<Option<ActiveTunnel>>> =
+        std::sync::OnceLock::new();
+    ACTIVE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn teardown_active(tunnel: ActiveTunnel) {
+    let _ = tunnel.stop_tx.send(());
+    std::thread::sleep(Duration::from_millis(200));
+    #[cfg(target_os = "macos")]
+    teardown_routing(
+        &tunnel.iface,
+        &tunnel.allowed_ips,
+        &tunnel.dns,
+        tunnel.ipv6_kill_switched,
+    );
+    #[cfg(target_os = "windows")]
+    {
+        let _ = crate::wireguard::remove_routes(&tunnel.iface, &tunnel.allowed_ips, &tunnel.dns);
+    }
+}
+
+fn take_and_teardown() {
+    if let Ok(mut guard) = active_tunnel().lock() {
+        if let Some(tunnel) = guard.take() {
+            teardown_active(tunnel);
+        }
+    }
+}
+
+async fn read_limited_line<R>(reader: &mut R) -> Result<String, String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+    let mut buf = Vec::new();
+    loop {
+        let available = reader.fill_buf().await.map_err(|e| e.to_string())?;
+        if available.is_empty() {
+            break;
+        }
+        if let Some(pos) = available.iter().position(|byte| *byte == b'\n') {
+            if buf.len() + pos > MAX_COMMAND_BYTES {
+                return Err("command too large".into());
+            }
+            buf.extend_from_slice(&available[..=pos]);
+            reader.consume(pos + 1);
+            break;
+        }
+        if buf.len() + available.len() > MAX_COMMAND_BYTES {
+            return Err("command too large".into());
+        }
+        let n = available.len();
+        buf.extend_from_slice(available);
+        reader.consume(n);
+    }
+    if buf.is_empty() {
+        return Err("eof".into());
+    }
+    String::from_utf8(buf).map_err(|_| "invalid command".to_string())
 }
 
 async fn handle_client<R, W>(
@@ -504,10 +725,10 @@ async fn handle_client<R, W>(
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let mut line = String::new();
-    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-        return;
-    }
+    let line = match read_limited_line(&mut reader).await {
+        Ok(line) => line,
+        Err(_) => return,
+    };
 
     let cmd = line.trim();
     if cmd == "STATS" {
@@ -518,6 +739,7 @@ async fn handle_client<R, W>(
     }
 
     if cmd == "SHUTDOWN" {
+        take_and_teardown();
         std::process::exit(0);
     }
 
@@ -551,14 +773,20 @@ async fn handle_client<R, W>(
 
     match run_tunnel(config_str, &mut writer, bytes_tx, bytes_rx).await {
         Ok((iface, stop_tx, allowed_ips, dns, ipv6_ks)) => {
-            let mut stop_line = String::new();
-            reader.read_line(&mut stop_line).await.ok();
-            let _ = stop_tx.send(());
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            #[cfg(target_os = "macos")]
-            teardown_routing(&iface, &allowed_ips, &dns, ipv6_ks);
-            #[cfg(target_os = "windows")]
-            let _ = (ipv6_ks, crate::wireguard::remove_routes(&iface, &allowed_ips, &dns));
+            if let Ok(mut guard) = active_tunnel().lock() {
+                if let Some(previous) = guard.take() {
+                    teardown_active(previous);
+                }
+                *guard = Some(ActiveTunnel {
+                    iface,
+                    stop_tx,
+                    allowed_ips,
+                    dns,
+                    ipv6_kill_switched: ipv6_ks,
+                });
+            }
+            let _ = read_limited_line(&mut reader).await;
+            take_and_teardown();
             let _ = writer.write_all(b"DISCONNECTED\n").await;
         }
         Err(e) => {
@@ -604,10 +832,7 @@ where
     #[cfg(target_os = "windows")]
     let (device, iface) = {
         let mut cfg = tun2::Configuration::default();
-        let wintun_path = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("wintun.dll")))
-            .unwrap_or_else(|| std::path::PathBuf::from("wintun.dll"));
+        let wintun_path = crate::wg_tunnel::wintun_dll_path();
         cfg.platform_config(|p| {
             p.wintun_file(&wintun_path);
         });
@@ -685,8 +910,7 @@ where
         peer.keepalive,
         0,
         None,
-    )
-    .map_err(|e| e.to_string())?;
+    );
 
     let udp = UdpSocket::bind("0.0.0.0:0")
         .await
@@ -908,8 +1132,23 @@ async fn task_timers(
 
 #[cfg(target_os = "macos")]
 pub fn is_installed() -> bool {
-    std::path::Path::new(HELPER_DEST).exists()
-        && std::path::Path::new(PLIST_DEST).exists()
+    std::path::Path::new(HELPER_DEST).exists() && std::path::Path::new(PLIST_DEST).exists()
+}
+
+#[cfg(target_os = "macos")]
+pub fn helper_is_current(_current_exe: &str) -> bool {
+    if !is_installed() {
+        return false;
+    }
+    std::fs::read_to_string(VERSION_FILE)
+        .map(|version| version.trim() == env!("CARGO_PKG_VERSION"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+pub fn helper_is_current(_current_exe: &str) -> bool {
+    is_installed()
+        && read_reg_sz("HelperVersion").as_deref() == Some(env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(target_os = "windows")]
@@ -930,6 +1169,12 @@ pub fn is_installed() -> bool {
 
 #[cfg(target_os = "macos")]
 pub fn install(current_exe: &str) -> Result<(), String> {
+    crate::validate::validate_posix_install_path(current_exe)?;
+    if !std::path::Path::new(current_exe).is_file() {
+        return Err("Application binary was not found.".into());
+    }
+    let uid = unsafe { libc::getuid() };
+    let version = env!("CARGO_PKG_VERSION");
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -957,15 +1202,27 @@ pub fn install(current_exe: &str) -> Result<(), String> {
     let plist_escaped = plist.replace('\'', "'\\''");
     let script = format!(
         "cp '{exe}' '{dest}' && \
+         chown root:wheel '{dest}' && \
          chmod 755 '{dest}' && \
          printf '%s' '{plist}' > '{plist_dest}' && \
          chmod 644 '{plist_dest}' && \
+         printf '%s\n' '{uid}' > '{uid_file}' && \
+         printf '%s\n' '{version}' > '{version_file}' && \
+         printf '%s\n' '{exe}' > '{client_file}' && \
+         chmod 644 '{uid_file}' '{version_file}' '{client_file}' && \
+         touch /var/log/wedima-vpn-wg-helper.log && \
+         chmod 600 /var/log/wedima-vpn-wg-helper.log && \
          launchctl unload '{plist_dest}' 2>/dev/null; \
          launchctl load -w '{plist_dest}'",
         exe = current_exe,
         dest = HELPER_DEST,
         plist = plist_escaped,
         plist_dest = PLIST_DEST,
+        uid = uid,
+        version = version,
+        uid_file = UID_FILE,
+        version_file = VERSION_FILE,
+        client_file = CLIENT_FILE,
     );
 
     let apple_script = format!(
@@ -991,28 +1248,45 @@ pub fn install(current_exe: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 pub fn install(current_exe: &str) -> Result<(), String> {
-    // Use PowerShell for a more robust installation script
+    crate::validate::validate_windows_install_path(current_exe)?;
+    let sid = current_user_sid()?;
+    let version = env!("CARGO_PKG_VERSION");
+    let exe_ps = current_exe.replace('\'', "''");
     let script = format!(
-        "$label = '{label}'; \
+        "$ErrorActionPreference = 'Stop'; \
+         $label = '{label}'; \
          $exe = '{exe}'; \
-         if (Get-Service $label -ErrorAction SilentlyContinue) {{ \
-             Stop-Service $label -ErrorAction SilentlyContinue; \
-             sc.exe delete $label; \
-             Start-Sleep -Seconds 1; \
-         }} \
-         sc.exe create $label binPath= \"\\\"$exe\\\"\" start= auto displayname= 'Wedima VPN Helper'; \
-         sc.exe description $label 'Privileged helper for Wedima VPN WireGuard tunnel.'; \
-         Start-Service $label",
+         $sid = '{sid}'; \
+         $version = '{version}'; \
+         if (Get-Service -Name $label -ErrorAction SilentlyContinue) {{ \
+             Stop-Service -Name $label -Force -ErrorAction SilentlyContinue; \
+             & sc.exe delete $label | Out-Null; \
+             Start-Sleep -Seconds 2; \
+         }}; \
+         New-Service -Name $label -BinaryPathName \"`\"$exe`\"\" -DisplayName 'Wedima VPN Helper' -StartupType Automatic | Out-Null; \
+         & sc.exe description $label 'Privileged helper for Wedima VPN WireGuard tunnel.' | Out-Null; \
+         New-Item -Path 'HKLM:\\Software\\Wedima\\VpnWg' -Force | Out-Null; \
+         Set-ItemProperty -Path 'HKLM:\\Software\\Wedima\\VpnWg' -Name AllowedUserSid -Value $sid; \
+         Set-ItemProperty -Path 'HKLM:\\Software\\Wedima\\VpnWg' -Name HelperVersion -Value $version; \
+         Start-Service -Name $label",
         label = HELPER_LABEL,
-        exe = current_exe
+        exe = exe_ps,
+        sid = sid,
+        version = version,
     );
-    
+
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
     let verb: Vec<u16> = "runas\0".encode_utf16().collect();
     let file: Vec<u16> = "powershell\0".encode_utf16().collect();
-    let params: Vec<u16> = format!("-NoProfile -NonInteractive -Command \"{}\"", script).encode_utf16().chain(Some(0u16)).collect();
+    let encoded = encode_powershell(&script);
+    let params: Vec<u16> = format!(
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {}\0",
+        encoded
+    )
+    .encode_utf16()
+    .collect();
 
     let result = unsafe {
         ShellExecuteW(
@@ -1031,4 +1305,158 @@ pub fn install(current_exe: &str) -> Result<(), String> {
 
     std::thread::sleep(Duration::from_secs(3));
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn encode_powershell(script: &str) -> String {
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(|unit| unit.to_le_bytes()).collect();
+    B64.encode(bytes)
+}
+
+#[cfg(target_os = "windows")]
+fn current_user_sid() -> Result<String, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return Err("Could not read the current user.".into());
+        }
+        let mut needed = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        if needed == 0 {
+            let _ = CloseHandle(token);
+            return Err("Could not read the current user.".into());
+        }
+        let mut buf = vec![0u8; needed as usize];
+        if GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr() as *mut _,
+            needed,
+            &mut needed,
+        ) == 0
+        {
+            let _ = CloseHandle(token);
+            return Err("Could not read the current user.".into());
+        }
+        let _ = CloseHandle(token);
+        let user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let mut sid_str = std::ptr::null_mut();
+        if ConvertSidToStringSidW(user.User.Sid, &mut sid_str) == 0 || sid_str.is_null() {
+            return Err("Could not read the current user.".into());
+        }
+        let mut len = 0usize;
+        while *sid_str.add(len) != 0 {
+            len += 1;
+            if len > 200 {
+                break;
+            }
+        }
+        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(sid_str, len));
+        let _ = LocalFree(sid_str as HLOCAL);
+        if !crate::validate::is_windows_sid(&sid) {
+            return Err("Could not read the current user.".into());
+        }
+        Ok(sid)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_reg_sz(value_name: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+    let subkey: Vec<u16> = "Software\\Wedima\\VpnWg\0".encode_utf16().collect();
+    let name: Vec<u16> = format!("{value_name}\0").encode_utf16().collect();
+    let mut buf = [0u16; 256];
+    let mut size = (buf.len() * 2) as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr() as *mut _,
+            &mut size,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let len = (size as usize / 2).saturating_sub(1);
+    let text = String::from_utf16_lossy(&buf[..len.min(buf.len())]);
+    let text = text.trim_end_matches('\0').trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+#[cfg(target_os = "windows")]
+pub fn ensure_pipe_peer_is_helper(
+    pipe: windows_sys::Win32::Foundation::HANDLE,
+    peer_is_server: bool,
+) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    unsafe {
+        let mut pid = 0u32;
+        let ok = if peer_is_server {
+            GetNamedPipeServerProcessId(pipe, &mut pid)
+        } else {
+            GetNamedPipeClientProcessId(pipe, &mut pid)
+        };
+        if ok == 0 || pid == 0 {
+            return Err("Could not identify the helper process.".into());
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return Err("Could not identify the helper process.".into());
+        }
+        let mut buf = [0u16; 1024];
+        let mut size = buf.len() as u32;
+        let queried = QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut size);
+        let _ = CloseHandle(process);
+        if queried == 0 {
+            return Err("Could not identify the helper process.".into());
+        }
+        let image = String::from_utf16_lossy(&buf[..size as usize]);
+        let own = std::env::current_exe().map_err(|_| "Could not identify the helper process.".to_string())?;
+        if normalize_windows_path(&image) != normalize_windows_path(&own.to_string_lossy()) {
+            return Err("Refusing to use an unexpected helper process.".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_path(path: &str) -> String {
+    path.trim_start_matches(r"\\?\").replace('/', "\\").to_ascii_lowercase()
+}
+
+pub async fn request_shutdown() {
+    use tokio::io::AsyncWriteExt;
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut stream) = tokio::net::UnixStream::connect(SOCKET_PATH).await {
+            let _ = stream.write_all(b"SHUTDOWN\n").await;
+            let _ = stream.flush().await;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::io::AsRawHandle;
+        if let Ok(mut stream) =
+            tokio::net::windows::named_pipe::ClientOptions::new().open(PIPE_NAME)
+        {
+            if ensure_pipe_peer_is_helper(stream.as_raw_handle(), true).is_ok() {
+                let _ = stream.write_all(b"SHUTDOWN\n").await;
+                let _ = stream.flush().await;
+            }
+        }
+    }
 }

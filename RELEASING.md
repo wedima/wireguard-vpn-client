@@ -6,7 +6,7 @@
 - GitHub Actions auf dem Repository aktiviert
 - `pnpm` installiert
 
-> **Windows ARM64**: Der `windows-11-arm` Runner benötigt GitHub **Team oder Enterprise**. Bei Free/Pro-Plan den Runner in beiden Workflows auf `windows-latest` ändern und `rustup target add aarch64-pc-windows-msvc` ergänzen (Cross-Compilation, kann bei nativen Abhängigkeiten eingeschränkt sein).
+> **Windows ARM64**: Der Job baut nativ mit `aarch64-pc-windows-msvc` auf `windows-11-arm`. Schlägt der Runner fehl, werden macOS und Windows x64 trotzdem veröffentlicht; ARM64 lädt dann nichts hoch.
 
 ---
 
@@ -42,6 +42,9 @@ Unter **GitHub → Actions → Release** läuft der Workflow mit drei parallelen
 | macOS Universal | `macos-latest` | `.dmg` (x64 + ARM64 in einem Binary) |
 | Windows x64 | `windows-latest` | `.exe` + `.msi` |
 | Windows ARM64 | `windows-11-arm` | `.exe` + `.msi` |
+| Linux AppImage | `ubuntu-latest` | `.AppImage` (the portable Linux package) |
+
+Ein Push auf den Arbeitsbranch startet dieselben Build-Jobs ohne ein `v*`-Tag und ohne GitHub Release. Ein Release wird nur bei einem Tag `v*` erstellt.
 
 Nach Abschluss aller drei Jobs wird automatisch ein **GitHub Release** mit allen Dateien erstellt.
 
@@ -82,14 +85,24 @@ pnpm run build:mac
 
 Output: `src-tauri/target/universal-apple-darwin/release/bundle/`
 
-> Dieser Build ist **nicht signiert/notarisiert** — für interne Tests ausreichend, für Endnutzer muss macOS-Codesigning eingerichtet werden (siehe unten).
+> Dieser Build ist **nicht Developer-ID-signiert und nicht notarisiert**. Ohne gültiges Zertifikat setzt der Workflow nur eine Ad-hoc-Signatur, damit Apple Silicon die Universal-Binary starten kann. Das ist keine Developer-ID-Signatur. Für Endnutzer müssen `APPLE_CERTIFICATE` und `APPLE_CERTIFICATE_PASSWORD` ersetzt werden (siehe unten).
 
 ---
 
 ## Wichtige Hinweise
 
+### Release-Prüfung
+
+Jeder Plattform-Job bricht ab, wenn das Paket strukturell ungültig ist:
+
+- macOS: universelles Binary (`lipo` enthält x86_64 und arm64), `--version` antwortet, Bundle-ID stimmt, DMG-Trailer und `hdiutil verify`
+- Windows: `--version` startet `wedima-vpn-wg.exe`, und diese Datei muss Maschine `0x8664` (x64) oder `0xaa64` (ARM64) sein. Der NSIS-Installer darf ein 32-bit-Stub (`0x14c`) sein, aber nur wenn die App-EXE selbst die richtige Maschine hat. MSI hat einen OLE-Header, `wintun.dll` liegt neben der EXE
+- Der Release-Job prüft die hochgeladenen Dateien noch einmal und legt `latest.json` **nur** an, wenn jede Updater-Datei eine Minisign-Signatur hat
+
+Ohne die Signatur-Secrets bleiben die Installer veröffentlicht, aber es gibt kein `latest.json`. Die App installiert dann kein Update.
+
 ### macOS Codesigning & Notarisierung
-Ohne Signierung zeigt macOS eine Sicherheitswarnung. Für signierte Builds folgende GitHub Secrets setzen:
+Ohne Developer-ID-Zertifikat zeigt macOS eine Sicherheitswarnung. Ein fehlendes oder ungültiges Zertifikat bricht den Universal-Build nicht ab: das `.dmg` wird gebaut und nur ad-hoc signiert (`signingIdentity: "-"`). Das gilt **nicht** als signiert. `APPLE_CERTIFICATE` muss das Base64 eines Developer ID PKCS#12 (oder ein PEM-Bundle mit Zertifikat und privatem Schlüssel) sein, und `APPLE_CERTIFICATE_PASSWORD` muss das dazu passende Export-Passwort sein. Für signierte Builds folgende GitHub Secrets setzen:
 
 | Secret | Beschreibung |
 |--------|-------------|
@@ -100,7 +113,7 @@ Ohne Signierung zeigt macOS eine Sicherheitswarnung. Für signierte Builds folge
 | `APPLE_PASSWORD` | App-spezifisches Passwort (nicht das Account-Passwort) |
 | `APPLE_TEAM_ID` | 10-stellige Team-ID aus dem Apple Developer Portal |
 
-Danach in `release.yml` beim macOS-Job ergänzen:
+Der macOS-Job übergibt diese Secrets bereits. Ersetzt werden müssen die Werte, nicht das Workflow-YAML:
 ```yaml
 env:
   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -110,6 +123,19 @@ env:
   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 ```
+
+### Automatische Updates
+
+Die App prüft nur `https://github.com/wedima/wireguard-vpn-client/releases/latest/download/latest.json`. Ohne die beiden Secrets unten schreibt der Workflow **kein** `latest.json`. Die App installiert dann kein Update. Ein Artefakt ohne gültige Minisign-Signatur, mit einer anderen Version im Trusted Comment, oder von einer anderen URL wird verworfen.
+
+Der Public Key steht in `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`). Die Secrets müssen zu genau diesem Key passen:
+
+| Secret | Wert |
+|--------|------|
+| `TAURI_SIGNING_PRIVATE_KEY` | Gesamter Inhalt der Private-Key-Datei, ohne sie ins Repo zu committen |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Passwort dieser Datei, ebenfalls nur als Secret |
+
+Dieses Environment kann die Secrets nicht setzen (GitHub antwortet mit 403). Der Repo-Owner muss sie unter **Settings → Secrets and variables → Actions** anlegen. Danach signiert `tauri build` die Updater-Artefakte, und der Release-Job veröffentlicht `latest.json` nur wenn jede Datei eine Signatur hat.
 
 ### Windows Code Signing
 Ohne Signierung zeigt Windows SmartScreen eine Warnung. Für signierte Builds:

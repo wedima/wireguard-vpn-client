@@ -11,6 +11,7 @@
     "release:patch": "node scripts/release.mjs patch",
     "release:minor": "node scripts/release.mjs minor",
     "release:major": "node scripts/release.mjs major",
+    "test": "node --test scripts/*.test.mjs",
     "encrypt:config:py": "python3 scripts/encrypt-config.py",
     "encrypt:config:node": "node scripts/encrypt-config.mjs"
   },
@@ -33,7 +34,7 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli": "^2.12.4",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",

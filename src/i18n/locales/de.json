@@ -12,6 +12,8 @@
     "german": "Deutsch"
   },
   "connect": {
+    "autoUpdate": "Automatisch aktualisieren",
+    "checkForUpdates": "Nach Updates suchen",
     "deleteConnection": "Verbindung löschen",
     "uninstallHelper": "Helper deinstallieren",
     "quitApplication": "Anwendung beenden",

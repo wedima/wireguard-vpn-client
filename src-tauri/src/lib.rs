@@ -1,5 +1,8 @@
 mod commands;
 mod crypto;
+mod secret_file;
+mod updates;
+mod validate;
 mod wg_config;
 #[cfg(not(target_os = "macos"))]
 mod wg_tunnel;
@@ -26,6 +29,7 @@ use cocoa::{
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
@@ -68,18 +72,7 @@ pub fn run() {
                     "quit" => {
                         let _ = tauri::async_runtime::block_on(async {
                             #[cfg(any(target_os = "macos", target_os = "windows"))]
-                            {
-                                use tokio::io::AsyncWriteExt;
-                                #[cfg(target_os = "macos")]
-                                let stream_res = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH).await;
-                                #[cfg(target_os = "windows")]
-                                let stream_res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
-                                
-                                if let Ok(mut stream) = stream_res {
-                                    let _ = stream.write_all(b"SHUTDOWN\n").await;
-                                    let _ = stream.flush().await;
-                                }
-                            }
+                            tunnel_daemon::request_shutdown().await;
                         });
                         std::process::exit(0);
                     }
@@ -119,6 +112,10 @@ pub fn run() {
                 }
             }
 
+            // A saved auto-update preference is left as the user set it.
+            // Startup still installs only a signed release from this repository.
+            updates::spawn_startup_update(app.handle());
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -138,6 +135,10 @@ pub fn run() {
             commands::get_stats,
             commands::uninstall_helper,
             commands::quit_app,
+            updates::get_auto_update,
+            updates::set_auto_update,
+            updates::get_update_status,
+            updates::check_for_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running application");

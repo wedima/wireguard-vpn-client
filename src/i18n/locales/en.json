@@ -12,6 +12,8 @@
     "german": "German"
   },
   "connect": {
+    "autoUpdate": "Update automatically",
+    "checkForUpdates": "Check for updates",
     "deleteConnection": "Delete Connection",
     "uninstallHelper": "Uninstall Helper",
     "quitApplication": "Quit Application",

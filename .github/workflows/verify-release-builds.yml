@@ -1,0 +1,16 @@
+name: Verify release builds
+
+# Runs the release build jobs on this working branch without publishing a v* release.
+on:
+  push:
+    branches:
+      - cursor/secure-autoupdate-releases-ab52
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  builds:
+    uses: ./.github/workflows/release.yml
+    secrets: inherit
