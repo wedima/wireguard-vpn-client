@@ -149,7 +149,14 @@ jobs:
           targets: aarch64-pc-windows-msvc
 
       - name: Install frontend deps
-        run: pnpm install --frozen-lockfile
+        shell: pwsh
+        run: |
+          # The app does not use the Node argon2 addon. node-gyp on windows-11-arm
+          # cannot see this runner's Visual Studio, so skip install scripts here
+          # and rebuild only esbuild, which Vite needs. The x64 job still runs a
+          # normal pnpm install.
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm rebuild esbuild
 
       - name: Verify bundled wintun hashes
         run: node scripts/verify-wintun.mjs

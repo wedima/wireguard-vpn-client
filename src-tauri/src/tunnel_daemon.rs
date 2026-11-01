@@ -420,19 +420,33 @@ impl HelperGate {
 
     fn allows(&self, stream: &tokio::net::UnixStream) -> bool {
         use std::os::fd::AsRawFd;
-        let Ok(cred) = stream.peer_cred() else {
+        let fd = stream.as_raw_fd();
+        // getpeereid, not tokio's UCred fields: those fields are private on macOS.
+        let Some(peer_uid) = peer_uid(fd) else {
             return false;
         };
-        if cred.uid != self.uid {
+        if peer_uid != self.uid {
             return false;
         }
-        let Ok(peer) = peer_executable(stream.as_raw_fd()) else {
+        let Ok(peer) = peer_executable(fd) else {
             return false;
         };
         if let Some(expected) = &self.team_id {
             return team_id_of(&peer).as_ref() == Some(expected);
         }
         paths_equal(&peer, &self.client_path)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn peer_uid(fd: i32) -> Option<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+    if rc == 0 {
+        Some(uid)
+    } else {
+        None
     }
 }
 
