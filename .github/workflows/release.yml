@@ -54,6 +54,12 @@ jobs:
           if [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
             args+=(--config src-tauri/tauri.updater.json)
           fi
+          # A stripped arm64 binary with no signature is killed before main.
+          # Ad-hoc identity "-" lets Apple Silicon execute it. It is not a
+          # Developer ID signature and the verify step must not call it signed.
+          if [[ "$(tr -d '[:space:]' < src-tauri/target/macos-code-signing.txt)" != "signed" ]]; then
+            args+=(--config src-tauri/tauri.macos-adhoc.json)
+          fi
           pnpm "${args[@]}"
 
       - name: Verify macOS bundle

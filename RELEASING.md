@@ -85,7 +85,7 @@ pnpm run build:mac
 
 Output: `src-tauri/target/universal-apple-darwin/release/bundle/`
 
-> Dieser Build ist **nicht signiert/notarisiert** — für interne Tests ausreichend, für Endnutzer muss macOS-Codesigning eingerichtet werden (siehe unten).
+> Dieser Build ist **nicht Developer-ID-signiert und nicht notarisiert**. Ohne gültiges Zertifikat setzt der Workflow nur eine Ad-hoc-Signatur, damit Apple Silicon die Universal-Binary starten kann. Das ist keine Developer-ID-Signatur. Für Endnutzer müssen `APPLE_CERTIFICATE` und `APPLE_CERTIFICATE_PASSWORD` ersetzt werden (siehe unten).
 
 ---
 
@@ -102,7 +102,7 @@ Jeder Plattform-Job bricht ab, wenn das Paket strukturell ungültig ist:
 Ohne die Signatur-Secrets bleiben die Installer veröffentlicht, aber es gibt kein `latest.json`. Die App installiert dann kein Update.
 
 ### macOS Codesigning & Notarisierung
-Ohne Signierung zeigt macOS eine Sicherheitswarnung. Für signierte Builds folgende GitHub Secrets setzen:
+Ohne Developer-ID-Zertifikat zeigt macOS eine Sicherheitswarnung. Ein fehlendes oder ungültiges Zertifikat bricht den Universal-Build nicht ab: das `.dmg` wird gebaut und nur ad-hoc signiert (`signingIdentity: "-"`). Das gilt **nicht** als signiert. `APPLE_CERTIFICATE` muss das Base64 eines Developer ID PKCS#12 (oder ein PEM-Bundle mit Zertifikat und privatem Schlüssel) sein, und `APPLE_CERTIFICATE_PASSWORD` muss das dazu passende Export-Passwort sein. Für signierte Builds folgende GitHub Secrets setzen:
 
 | Secret | Beschreibung |
 |--------|-------------|
@@ -113,7 +113,7 @@ Ohne Signierung zeigt macOS eine Sicherheitswarnung. Für signierte Builds folge
 | `APPLE_PASSWORD` | App-spezifisches Passwort (nicht das Account-Passwort) |
 | `APPLE_TEAM_ID` | 10-stellige Team-ID aus dem Apple Developer Portal |
 
-Danach in `release.yml` beim macOS-Job ergänzen:
+Der macOS-Job übergibt diese Secrets bereits. Ersetzt werden müssen die Werte, nicht das Workflow-YAML:
 ```yaml
 env:
   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}

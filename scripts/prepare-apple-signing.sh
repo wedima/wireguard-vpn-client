@@ -22,6 +22,6 @@ mkdir -p src-tauri/target
 printf '%s\n' "$macos_signing" > src-tauri/target/macos-code-signing.txt
 
 if [[ "$macos_signing" != "signed" ]]; then
-  echo "::warning::APPLE_CERTIFICATE is missing or not a PKCS#12 file or PEM bundle with its private key, or APPLE_CERTIFICATE_PASSWORD does not match. Building an unsigned universal macOS binary. Replace those two GitHub Actions secrets. This artifact is not signed."
+  echo "::warning::APPLE_CERTIFICATE is missing or not a PKCS#12 file or PEM bundle with its private key, or APPLE_CERTIFICATE_PASSWORD does not match. The universal binary will only receive an ad-hoc signature so Apple Silicon can launch it. Replace those two GitHub Actions secrets. This artifact is not Developer ID signed."
   unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
 fi
