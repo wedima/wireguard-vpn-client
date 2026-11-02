@@ -1,0 +1,2 @@
+src-tauri/update-fixtures/payload.bin binary
+src-tauri/update-fixtures/*.sig binary
