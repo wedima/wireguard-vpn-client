@@ -9,6 +9,14 @@ use crate::secret_file;
 const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 const MIN_PASSWORD_CHARS: usize = 8;
 
+struct Wipe(String);
+
+impl Drop for Wipe {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn is_elevated() -> bool {
     use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
@@ -96,11 +104,19 @@ pub struct StatsResult {
 }
 
 fn state_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("state.json"))
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("state.json"))
 }
 
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("config.enc"))
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("config.enc"))
 }
 
 fn ensure_data_dir(app: &tauri::AppHandle) -> Result<(), String> {
@@ -126,8 +142,12 @@ fn read_limited_file(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 fn read_state(app: &tauri::AppHandle) -> StoredState {
-    let Ok(path) = state_path(app) else { return StoredState::default() };
-    let Ok(s) = std::fs::read_to_string(path) else { return StoredState::default() };
+    let Ok(path) = state_path(app) else {
+        return StoredState::default();
+    };
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return StoredState::default();
+    };
     serde_json::from_str(&s).unwrap_or_default()
 }
 
@@ -212,7 +232,14 @@ pub async fn import_config(
         pwd.zeroize();
     }
     ensure_data_dir(&app)?;
-    write_state(&app, &StoredState { has_config: true, has_password: false, connection_name })
+    write_state(
+        &app,
+        &StoredState {
+            has_config: true,
+            has_password: false,
+            connection_name,
+        },
+    )
 }
 
 #[tauri::command]
@@ -241,7 +268,14 @@ pub async fn setup_connection_password(
     secret_file::write_private(&config_path(&app)?, &encrypted)?;
 
     let connection_name = read_state(&app).connection_name;
-    write_state(&app, &StoredState { has_config: true, has_password: true, connection_name })
+    write_state(
+        &app,
+        &StoredState {
+            has_config: true,
+            has_password: true,
+            connection_name,
+        },
+    )
 }
 
 #[tauri::command]
@@ -251,15 +285,21 @@ pub async fn connect(
     password: String,
 ) -> Result<(), String> {
     let mut password = password;
-    let encrypted = std::fs::read(config_path(&app)?)
-        .map_err(|_| "No config found. Please import first.")?;
+    let encrypted =
+        std::fs::read(config_path(&app)?).map_err(|_| "No config found. Please import first.")?;
     let plaintext = crypto::decrypt_from_storage(&encrypted, &password);
     password.zeroize();
     let plaintext = plaintext?;
-    let mut conf_str =
-        String::from_utf8(plaintext).map_err(|_| "Config content is invalid UTF-8.")?;
+    let mut conf_str = match String::from_utf8(plaintext) {
+        Ok(text) => Wipe(text),
+        Err(err) => {
+            let mut bytes = err.into_bytes();
+            bytes.zeroize();
+            return Err("Config content is invalid UTF-8.".into());
+        }
+    };
     // Parsing here rejects configs that would be unsafe to hand to the helper.
-    crate::wg_config::parse(&conf_str)?;
+    crate::wg_config::parse(&conf_str.0)?;
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -277,38 +317,28 @@ pub async fn connect(
             tunnel_daemon::install(&exe)?;
         }
 
-        let mut config_b64 = B64.encode(conf_str.as_bytes());
-        conf_str.zeroize();
+        let config_b64 = Wipe(B64.encode(conf_str.0.as_bytes()));
+        conf_str.0.zeroize();
 
         #[cfg(target_os = "macos")]
         let stream_res = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH).await;
         #[cfg(target_os = "windows")]
-        let stream_res = {
-            let mut res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
-            if res.is_err() {
-                for _ in 0..10 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
-                    if res.is_ok() { break; }
-                }
-            }
-            res
-        };
+        let stream_res = tunnel_daemon::open_helper_pipe().await;
 
-        let stream = stream_res.map_err(|e| format!("Cannot reach helper daemon: {}. Try restarting the app.", e))?;
+        let stream = stream_res
+            .map_err(|e| format!("Cannot reach helper daemon: {e}. Try restarting the app."))?;
         let mut stream = stream;
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::io::AsRawHandle;
-            tunnel_daemon::ensure_pipe_peer_is_helper(stream.as_raw_handle(), true)?;
-        }
 
         stream
-            .write_all(format!("START {}\n", config_b64).as_bytes())
+            .write_all(b"START ")
             .await
             .map_err(|e| e.to_string())?;
+        stream
+            .write_all(config_b64.0.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stream.write_all(b"\n").await.map_err(|e| e.to_string())?;
         stream.flush().await.ok();
-        config_b64.zeroize();
 
         let mut response = String::new();
         {
@@ -337,8 +367,8 @@ pub async fn connect(
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         use crate::wg_tunnel::WgSession;
-        let session = WgSession::start(&conf_str).await?;
-        conf_str.zeroize();
+        let session = WgSession::start(&conf_str.0).await?;
+        conf_str.0.zeroize();
         *state.session.lock().await = Some(session);
     }
 
@@ -362,12 +392,7 @@ pub async fn disconnect(state: tauri::State<'_, AppState>) -> Result<(), String>
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let session = state
-            .session
-            .lock()
-            .await
-            .take()
-            .ok_or("Not connected.")?;
+        let session = state.session.lock().await.take().ok_or("Not connected.")?;
         session.stop()?;
     }
 
@@ -405,50 +430,49 @@ pub async fn get_stats(
 
         let is_connected = state.daemon_stream.lock().await.is_some();
         if !is_connected {
-            return Ok(StatsResult { bytes_tx: 0, bytes_rx: 0, connection_name });
+            return Ok(StatsResult {
+                bytes_tx: 0,
+                bytes_rx: 0,
+                connection_name,
+            });
         }
 
         #[cfg(target_os = "macos")]
         let stream_res = tokio::net::UnixStream::connect(tunnel_daemon::SOCKET_PATH).await;
         #[cfg(target_os = "windows")]
-        let stream_res = {
-            let mut res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
-            if res.is_err() {
-                for _ in 0..10 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    res = tokio::net::windows::named_pipe::ClientOptions::new().open(tunnel_daemon::PIPE_NAME);
-                    if res.is_ok() { break; }
-                }
-            }
-            res
-        };
+        let stream_res = tunnel_daemon::open_helper_pipe().await;
 
         let mut stream = stream_res.map_err(|e| format!("Stats connect: {}", e))?;
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::io::AsRawHandle;
-            tunnel_daemon::ensure_pipe_peer_is_helper(stream.as_raw_handle(), true)?;
-        }
 
-        stream.write_all(b"STATS\n").await.map_err(|e| e.to_string())?;
+        stream
+            .write_all(b"STATS\n")
+            .await
+            .map_err(|e| e.to_string())?;
         stream.flush().await.map_err(|e| e.to_string())?;
 
         let mut line = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            async {
-                let mut reader = BufReader::new(&mut stream);
-                reader.read_line(&mut line).await
-            },
-        )
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut reader = BufReader::new(&mut stream);
+            reader.read_line(&mut line).await
+        })
         .await
         .map_err(|_| "Stats timeout".to_string())?
         .map_err(|e| e.to_string())?;
 
         let mut parts = line.split_whitespace();
-        let tx = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        let rx = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-        return Ok(StatsResult { bytes_tx: tx, bytes_rx: rx, connection_name });
+        let tx = parts
+            .next()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let rx = parts
+            .next()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        return Ok(StatsResult {
+            bytes_tx: tx,
+            bytes_rx: rx,
+            connection_name,
+        });
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -462,7 +486,11 @@ pub async fn get_stats(
         } else {
             (0, 0)
         };
-        Ok(StatsResult { bytes_tx: tx, bytes_rx: rx, connection_name })
+        Ok(StatsResult {
+            bytes_tx: tx,
+            bytes_rx: rx,
+            connection_name,
+        })
     }
 }
 
@@ -511,13 +539,16 @@ pub async fn uninstall_helper() -> Result<(), String> {
              }}",
             label = tunnel_daemon::HELPER_LABEL
         );
-        
+
         use windows_sys::Win32::UI::Shell::ShellExecuteW;
         use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
         let verb: Vec<u16> = "runas\0".encode_utf16().collect();
         let file: Vec<u16> = "powershell\0".encode_utf16().collect();
-        let params: Vec<u16> = format!("-NoProfile -NonInteractive -Command \"{}\"", script).encode_utf16().chain(Some(0u16)).collect();
+        let params: Vec<u16> = format!("-NoProfile -NonInteractive -Command \"{}\"", script)
+            .encode_utf16()
+            .chain(Some(0u16))
+            .collect();
 
         let result = unsafe {
             ShellExecuteW(

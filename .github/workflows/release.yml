@@ -14,6 +14,8 @@ jobs:
   build-macos:
     name: macOS Universal
     runs-on: macos-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
@@ -82,6 +84,8 @@ jobs:
   build-windows-x64:
     name: Windows x64
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
@@ -138,6 +142,8 @@ jobs:
   build-windows-arm64:
     name: Windows ARM64
     runs-on: windows-11-arm
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
@@ -201,6 +207,8 @@ jobs:
   build-linux:
     name: Linux AppImage
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 

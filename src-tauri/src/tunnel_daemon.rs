@@ -1,6 +1,6 @@
-use std::net::{SocketAddr, ToSocketAddrs};
 #[cfg(target_os = "macos")]
 use std::net::IpAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,11 +19,13 @@ use tokio::net::windows::named_pipe::NamedPipeServer;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 #[cfg(target_os = "windows")]
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
+};
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Pipes::{
     CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -33,6 +35,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, Mutex};
 use tokio::time::interval;
+use zeroize::Zeroize;
 
 const MAX_PACKET: usize = 65536;
 
@@ -40,6 +43,8 @@ const MAX_PACKET: usize = 65536;
 pub const SOCKET_PATH: &str = "/var/run/com.wedima.vpn.wg.helper.sock";
 #[cfg(target_os = "windows")]
 pub const PIPE_NAME: &str = r"\\.\pipe\com.wedima.vpn.wg.helper";
+#[cfg(target_os = "windows")]
+const PIPE_SLOTS: usize = 4;
 
 #[cfg(target_os = "macos")]
 pub const UID_FILE: &str = "/Library/PrivilegedHelperTools/com.wedima.vpn.wg.helper.uid";
@@ -77,7 +82,10 @@ fn create_utun_fd() -> Result<(i32, String), String> {
         if fd < 0 {
             return Err(format!("socket: {}", std::io::Error::last_os_error()));
         }
-        let mut info = CtlInfo { ctl_id: 0, ctl_name: [0u8; 96] };
+        let mut info = CtlInfo {
+            ctl_id: 0,
+            ctl_name: [0u8; 96],
+        };
         let n = UTUN_CONTROL_NAME;
         info.ctl_name[..n.len() - 1].copy_from_slice(&n[..n.len() - 1]);
 
@@ -201,8 +209,13 @@ fn enable_ipv6() {
 }
 
 #[cfg(target_os = "macos")]
-fn setup_routing(iface: &str, peer_ip: &str, allowed_ips: &[String], has_ipv6_tunnel: bool) -> bool {
-    if let Some(gw) = default_gateway() {
+fn setup_routing(
+    iface: &str,
+    peer_ip: &str,
+    allowed_ips: &[String],
+    has_ipv6_tunnel: bool,
+) -> bool {
+    if let Some(gw) = default_gateway().filter(|gw| crate::validate::is_ip_address(gw)) {
         let _ = std::process::Command::new("route")
             .args(["add", "-host", peer_ip, &gw])
             .status();
@@ -222,34 +235,33 @@ fn setup_routing(iface: &str, peer_ip: &str, allowed_ips: &[String], has_ipv6_tu
         }
     }
 
-    let ipv6_allowed: Vec<&String> = allowed_ips.iter().filter(|c| c.contains(':')).collect();
     let mut ipv6_kill_switched = false;
-
-    if !ipv6_allowed.is_empty() {
-        if has_ipv6_tunnel {
-            if let Some(gw6) = default_gateway_v6() {
+    if has_ipv6_tunnel {
+        if peer_ip.contains(':') {
+            if let Some(gw6) = default_gateway_v6().filter(|gw| crate::validate::is_ip_address(gw))
+            {
                 let _ = std::process::Command::new("route")
                     .args(["add", "-inet6", "-host", peer_ip, &gw6])
                     .status();
             }
-            for cidr in &ipv6_allowed {
-                if *cidr == "::/0" {
-                    let _ = std::process::Command::new("route")
-                        .args(["add", "-inet6", "-net", "::/1", "-interface", iface])
-                        .status();
-                    let _ = std::process::Command::new("route")
-                        .args(["add", "-inet6", "-net", "8000::/1", "-interface", iface])
-                        .status();
-                } else {
-                    let _ = std::process::Command::new("route")
-                        .args(["add", "-inet6", "-net", cidr, "-interface", iface])
-                        .status();
-                }
-            }
-        } else {
-            disable_ipv6();
-            ipv6_kill_switched = true;
         }
+        for cidr in allowed_ips.iter().filter(|c| c.contains(':')) {
+            if cidr == "::/0" {
+                let _ = std::process::Command::new("route")
+                    .args(["add", "-inet6", "-net", "::/1", "-interface", iface])
+                    .status();
+                let _ = std::process::Command::new("route")
+                    .args(["add", "-inet6", "-net", "8000::/1", "-interface", iface])
+                    .status();
+            } else {
+                let _ = std::process::Command::new("route")
+                    .args(["add", "-inet6", "-net", cidr, "-interface", iface])
+                    .status();
+            }
+        }
+    } else if crate::validate::should_block_native_ipv6(false, allowed_ips) {
+        disable_ipv6();
+        ipv6_kill_switched = true;
     }
 
     ipv6_kill_switched
@@ -334,7 +346,7 @@ pub fn run_as_service() -> Result<(), windows_service::Error> {
 #[cfg(target_os = "windows")]
 fn windows_service_main(_arguments: Vec<std::ffi::OsString>) {
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
-    
+
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop => {
@@ -345,17 +357,20 @@ fn windows_service_main(_arguments: Vec<std::ffi::OsString>) {
         }
     };
 
-    let status_handle = service_control_handler::register(HELPER_LABEL, event_handler).expect("register service control handler");
+    let status_handle = service_control_handler::register(HELPER_LABEL, event_handler)
+        .expect("register service control handler");
 
-    status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    }).expect("set service status");
+    status_handle
+        .set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Running,
+            controls_accepted: ServiceControlAccept::STOP,
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })
+        .expect("set service status");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -373,15 +388,17 @@ fn windows_service_main(_arguments: Vec<std::ffi::OsString>) {
         }
     });
 
-    status_handle.set_service_status(ServiceStatus {
-        service_type: ServiceType::OWN_PROCESS,
-        current_state: ServiceState::Stopped,
-        controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
-        process_id: None,
-    }).expect("set service status stopped");
+    status_handle
+        .set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })
+        .expect("set service status stopped");
 }
 
 pub fn run_daemon() {
@@ -472,7 +489,9 @@ fn peer_executable(fd: i32) -> Result<std::path::PathBuf, ()> {
         return Err(());
     }
     let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n as usize) };
-    let path = String::from_utf8_lossy(bytes).trim_end_matches('\0').to_string();
+    let path = String::from_utf8_lossy(bytes)
+        .trim_end_matches('\0')
+        .to_string();
     Ok(std::path::PathBuf::from(path))
 }
 
@@ -596,7 +615,7 @@ fn create_restricted_pipe(pipe_name: &str, first: bool) -> Result<NamedPipeServe
             wide_name.as_ptr(),
             access,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            255,   // max instances
+            PIPE_SLOTS as u32,
             65536, // out buffer
             65536, // in buffer
             0,     // default timeout
@@ -605,7 +624,10 @@ fn create_restricted_pipe(pipe_name: &str, first: bool) -> Result<NamedPipeServe
 
         if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
             LocalFree(sd_ptr as windows_sys::Win32::Foundation::HLOCAL);
-            return Err(format!("CreateNamedPipeW failed: {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "CreateNamedPipeW failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         LocalFree(sd_ptr as windows_sys::Win32::Foundation::HLOCAL);
 
@@ -615,43 +637,86 @@ fn create_restricted_pipe(pipe_name: &str, first: bool) -> Result<NamedPipeServe
 }
 
 #[cfg(target_os = "windows")]
+async fn connect_ready(server: Option<&NamedPipeServer>) -> std::io::Result<()> {
+    match server {
+        Some(server) => server.connect().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(target_os = "windows")]
 async fn daemon_loop() {
     let bytes_tx = Arc::new(AtomicU64::new(0));
     let bytes_rx = Arc::new(AtomicU64::new(0));
-    let mut first = true;
+    let mut slots: [Option<NamedPipeServer>; PIPE_SLOTS] = Default::default();
+    // Stay the pipe's creating server. Joining an instance somebody else created
+    // would accept that process's ACL and instance quota.
+    let mut owns_pipe = false;
 
     loop {
-        let server = match create_restricted_pipe(PIPE_NAME, first) {
-            Ok(s) => s,
-            Err(_e) => {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+        for slot in slots.iter_mut() {
+            if slot.is_some() {
                 continue;
             }
-        };
-        first = false;
-
-        if server.connect().await.is_ok() {
-            use std::os::windows::io::AsRawHandle;
-            if ensure_pipe_peer_is_helper(server.as_raw_handle(), false).is_err() {
-                eprintln!("helper rejected a connection");
-                continue;
+            match create_restricted_pipe(PIPE_NAME, !owns_pipe) {
+                Ok(server) => {
+                    owns_pipe = true;
+                    *slot = Some(server);
+                }
+                Err(_) => {
+                    tokio::time::sleep(if owns_pipe {
+                        Duration::from_millis(50)
+                    } else {
+                        Duration::from_secs(1)
+                    })
+                    .await;
+                    break;
+                }
             }
-            let btx = Arc::clone(&bytes_tx);
-            let brx = Arc::clone(&bytes_rx);
-            tokio::spawn(async move {
-                let (reader, writer) = tokio::io::split(server);
-                handle_client(BufReader::new(reader), writer, btx, brx).await;
-            });
         }
+        if slots.iter().all(|slot| slot.is_none()) {
+            continue;
+        }
+
+        let (index, result) = tokio::select! {
+            result = connect_ready(slots[0].as_ref()) => (0, result),
+            result = connect_ready(slots[1].as_ref()) => (1, result),
+            result = connect_ready(slots[2].as_ref()) => (2, result),
+            result = connect_ready(slots[3].as_ref()) => (3, result),
+        };
+        if result.is_err() {
+            slots[index] = None;
+            continue;
+        }
+        let Some(server) = slots[index].take() else {
+            continue;
+        };
+        use std::os::windows::io::AsRawHandle;
+        if ensure_pipe_peer_is_helper(server.as_raw_handle(), false).is_err() {
+            eprintln!("helper rejected a connection");
+            continue;
+        }
+        let btx = Arc::clone(&bytes_tx);
+        let brx = Arc::clone(&bytes_rx);
+        tokio::spawn(async move {
+            let (reader, writer) = tokio::io::split(server);
+            handle_client(BufReader::new(reader), writer, btx, brx).await;
+        });
     }
 }
 
 struct ActiveTunnel {
+    id: u64,
     iface: String,
     stop_tx: broadcast::Sender<()>,
     allowed_ips: Vec<String>,
     dns: Vec<String>,
     ipv6_kill_switched: bool,
+}
+
+fn next_tunnel_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 fn active_tunnel() -> &'static std::sync::Mutex<Option<ActiveTunnel>> {
@@ -672,7 +737,8 @@ fn teardown_active(tunnel: ActiveTunnel) {
     );
     #[cfg(target_os = "windows")]
     {
-        let _ = crate::wireguard::remove_routes(&tunnel.iface, &tunnel.allowed_ips, &tunnel.dns);
+        let _ =
+            crate::wireguard::remove_routes(&tunnel.iface, &tunnel.allowed_ips, &tunnel.dns, false);
     }
 }
 
@@ -734,7 +800,9 @@ async fn handle_client<R, W>(
     if cmd == "STATS" {
         let tx = bytes_tx.load(Ordering::Relaxed);
         let rx = bytes_rx.load(Ordering::Relaxed);
-        let _ = writer.write_all(format!("{} {}\n", tx, rx).as_bytes()).await;
+        let _ = writer
+            .write_all(format!("{} {}\n", tx, rx).as_bytes())
+            .await;
         return;
     }
 
@@ -771,13 +839,29 @@ async fn handle_client<R, W>(
     bytes_tx.store(0, Ordering::Relaxed);
     bytes_rx.store(0, Ordering::Relaxed);
 
+    // Remove the previous tunnel before installing routes. Windows `route DELETE`
+    // is not scoped to one interface, so doing it afterwards would remove the
+    // new tunnel's routes as well. The previous connection then sees a newer
+    // id and must not tear this one down.
+    let previous = {
+        let mut guard = active_tunnel()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        guard.take()
+    };
+    if let Some(previous) = previous {
+        teardown_active(previous);
+    }
+
     match run_tunnel(config_str, &mut writer, bytes_tx, bytes_rx).await {
         Ok((iface, stop_tx, allowed_ips, dns, ipv6_ks)) => {
-            if let Ok(mut guard) = active_tunnel().lock() {
-                if let Some(previous) = guard.take() {
-                    teardown_active(previous);
-                }
+            let id = next_tunnel_id();
+            {
+                let mut guard = active_tunnel()
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
                 *guard = Some(ActiveTunnel {
+                    id,
                     iface,
                     stop_tx,
                     allowed_ips,
@@ -786,13 +870,19 @@ async fn handle_client<R, W>(
                 });
             }
             let _ = read_limited_line(&mut reader).await;
-            take_and_teardown();
+            let finished = {
+                let mut guard = active_tunnel()
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                crate::tunnel_slot::take_if(&mut *guard, |tunnel| tunnel.id == id)
+            };
+            if let Some(tunnel) = finished {
+                teardown_active(tunnel);
+            }
             let _ = writer.write_all(b"DISCONNECTED\n").await;
         }
         Err(e) => {
-            let _ = writer
-                .write_all(format!("ERROR {}\n", e).as_bytes())
-                .await;
+            let _ = writer.write_all(format!("ERROR {}\n", e).as_bytes()).await;
         }
     }
 }
@@ -811,11 +901,14 @@ async fn run_tunnel<W>(
         bool,
     ),
     String,
-> 
+>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let config = crate::wg_config::parse(&config_str)?;
+    let mut config_str = config_str;
+    let parsed = crate::wg_config::parse(&config_str);
+    config_str.zeroize();
+    let config = parsed?;
     let peer = config.peers.first().ok_or("No [Peer] in config")?;
 
     let endpoint_str = peer.endpoint.as_deref().ok_or("Peer has no Endpoint")?;
@@ -839,7 +932,10 @@ where
         let device = tun2::create_as_async(&cfg)
             .map_err(|e| format!("Failed to create TUN device: {}", e))?;
         use tun2::AbstractDevice;
-        let name = device.tun_name().map_err(|e: tun2::Error| e.to_string())?.to_string();
+        let name = device
+            .tun_name()
+            .map_err(|e: tun2::Error| e.to_string())?
+            .to_string();
         (device, name)
     };
 
@@ -854,10 +950,15 @@ where
         })
         .ok_or("No IPv4 address in [Interface]")?;
 
-    let iface_addr6 = config.interface.addresses.iter().find(|a| a.contains(':')).map(|cidr| {
-        let (a, p) = cidr.split_once('/').unwrap_or((cidr, "128"));
-        (a.to_string(), p.parse::<u8>().unwrap_or(128))
-    });
+    let iface_addr6 = config
+        .interface
+        .addresses
+        .iter()
+        .find(|a| a.contains(':'))
+        .map(|cidr| {
+            let (a, p) = cidr.split_once('/').unwrap_or((cidr, "128"));
+            (a.to_string(), p.parse::<u8>().unwrap_or(128))
+        });
 
     let has_ipv6_tunnel = iface_addr6.is_some();
     #[cfg(target_os = "windows")]
@@ -872,8 +973,8 @@ where
             iface_addr6.as_ref().map(|(a, p)| (a.as_str(), *p)),
         );
     }
-    
-#[cfg(target_os = "macos")]
+
+    #[cfg(target_os = "macos")]
     let ipv6_ks = setup_routing(&iface, &peer_ip, &peer.allowed_ips, has_ipv6_tunnel);
     #[cfg(target_os = "macos")]
     setup_dns(&config.interface.dns);
@@ -881,22 +982,26 @@ where
     let ipv6_ks = false;
     #[cfg(target_os = "windows")]
     {
-        use crate::wireguard::{IfaceConfig, setup_routes};
+        use crate::wireguard::{setup_routes, IfaceConfig};
         let iface_cfg = IfaceConfig {
             addr: &iface_addr,
             prefix_len,
             addr6: iface_addr6.as_ref().map(|(a, p)| (a.as_str(), *p)),
             mtu: config.interface.mtu,
         };
-        setup_routes(&iface, &iface_cfg, &peer.allowed_ips, &config.interface.dns, &peer_ip)?;
+        setup_routes(
+            &iface,
+            &iface_cfg,
+            &peer.allowed_ips,
+            &config.interface.dns,
+            &peer_ip,
+        )?;
     }
 
     #[cfg(target_os = "macos")]
     let async_fd = {
         let owned_fd = unsafe { OwnedFd::from_raw_fd(tun_fd) };
-        Arc::new(
-            AsyncFd::new(owned_fd).map_err(|e| format!("AsyncFd: {}", e))?,
-        )
+        Arc::new(AsyncFd::new(owned_fd).map_err(|e| format!("AsyncFd: {}", e))?)
     };
     #[cfg(target_os = "windows")]
     let (tun_reader, tun_writer) = tokio::io::split(device);
@@ -915,7 +1020,9 @@ where
     let udp = UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| format!("UDP bind: {}", e))?;
-    udp.connect(endpoint).await.map_err(|e| format!("UDP connect: {}", e))?;
+    udp.connect(endpoint)
+        .await
+        .map_err(|e| format!("UDP connect: {}", e))?;
     let udp = Arc::new(udp);
     let tunn = Arc::new(Mutex::new(tunn));
     let (stop_tx, _) = broadcast::channel::<()>(4);
@@ -1010,7 +1117,11 @@ async fn tun_read(fd: &AsyncFd<OwnedFd>, buf: &mut [u8]) -> std::io::Result<usiz
 #[cfg(target_os = "macos")]
 fn tun_write_sync(fd: &OwnedFd, buf: &[u8]) -> std::io::Result<()> {
     let n = unsafe {
-        libc::write(fd.as_raw_fd(), buf.as_ptr() as *const libc::c_void, buf.len())
+        libc::write(
+            fd.as_raw_fd(),
+            buf.as_ptr() as *const libc::c_void,
+            buf.len(),
+        )
     };
     if n < 0 {
         Err(std::io::Error::last_os_error())
@@ -1147,8 +1258,7 @@ pub fn helper_is_current(_current_exe: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 pub fn helper_is_current(_current_exe: &str) -> bool {
-    is_installed()
-        && read_reg_sz("HelperVersion").as_deref() == Some(env!("CARGO_PKG_VERSION"))
+    is_installed() && read_reg_sz("HelperVersion").as_deref() == Some(env!("CARGO_PKG_VERSION"))
 }
 
 #[cfg(target_os = "windows")]
@@ -1156,7 +1266,7 @@ pub fn is_installed() -> bool {
     let out = std::process::Command::new("sc")
         .args(["query", HELPER_LABEL])
         .output();
-    
+
     match out {
         Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout);
@@ -1309,7 +1419,10 @@ pub fn install(current_exe: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn encode_powershell(script: &str) -> String {
-    let bytes: Vec<u8> = script.encode_utf16().flat_map(|unit| unit.to_le_bytes()).collect();
+    let bytes: Vec<u8> = script
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
     B64.encode(bytes)
 }
 
@@ -1389,7 +1502,11 @@ fn read_reg_sz(value_name: &str) -> Option<String> {
     let len = (size as usize / 2).saturating_sub(1);
     let text = String::from_utf16_lossy(&buf[..len.min(buf.len())]);
     let text = text.trim_end_matches('\0').trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1398,12 +1515,22 @@ pub fn ensure_pipe_peer_is_helper(
     peer_is_server: bool,
 ) -> Result<(), String> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
+    use windows_sys::Win32::System::Pipes::{
+        GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+    };
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     unsafe {
+        if peer_is_server {
+            let mut session = 0u32;
+            let session_ok =
+                windows_sys::Win32::System::Pipes::GetNamedPipeServerSessionId(pipe, &mut session);
+            if session_ok == 0 || !crate::validate::is_windows_service_session(session) {
+                return Err("Refusing to use a helper that is not the installed service.".into());
+            }
+        }
         let mut pid = 0u32;
         let ok = if peer_is_server {
             GetNamedPipeServerProcessId(pipe, &mut pid)
@@ -1425,7 +1552,8 @@ pub fn ensure_pipe_peer_is_helper(
             return Err("Could not identify the helper process.".into());
         }
         let image = String::from_utf16_lossy(&buf[..size as usize]);
-        let own = std::env::current_exe().map_err(|_| "Could not identify the helper process.".to_string())?;
+        let own = std::env::current_exe()
+            .map_err(|_| "Could not identify the helper process.".to_string())?;
         if normalize_windows_path(&image) != normalize_windows_path(&own.to_string_lossy()) {
             return Err("Refusing to use an unexpected helper process.".into());
         }
@@ -1435,7 +1563,28 @@ pub fn ensure_pipe_peer_is_helper(
 
 #[cfg(target_os = "windows")]
 fn normalize_windows_path(path: &str) -> String {
-    path.trim_start_matches(r"\\?\").replace('/', "\\").to_ascii_lowercase()
+    path.trim_start_matches(r"\\?\")
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+}
+
+#[cfg(target_os = "windows")]
+pub async fn open_helper_pipe() -> Result<tokio::net::windows::named_pipe::NamedPipeClient, String>
+{
+    use std::os::windows::io::AsRawHandle;
+    use tokio::net::windows::named_pipe::ClientOptions;
+    let mut last = "helper pipe is not available".to_string();
+    for _ in 0..20 {
+        match ClientOptions::new().open(PIPE_NAME) {
+            Ok(pipe) => match ensure_pipe_peer_is_helper(pipe.as_raw_handle(), true) {
+                Ok(()) => return Ok(pipe),
+                Err(err) => last = err,
+            },
+            Err(err) => last = err.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(format!("Cannot reach helper daemon: {last}"))
 }
 
 pub async fn request_shutdown() {
@@ -1449,14 +1598,9 @@ pub async fn request_shutdown() {
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::io::AsRawHandle;
-        if let Ok(mut stream) =
-            tokio::net::windows::named_pipe::ClientOptions::new().open(PIPE_NAME)
-        {
-            if ensure_pipe_peer_is_helper(stream.as_raw_handle(), true).is_ok() {
-                let _ = stream.write_all(b"SHUTDOWN\n").await;
-                let _ = stream.flush().await;
-            }
+        if let Ok(mut stream) = open_helper_pipe().await {
+            let _ = stream.write_all(b"SHUTDOWN\n").await;
+            let _ = stream.flush().await;
         }
     }
 }

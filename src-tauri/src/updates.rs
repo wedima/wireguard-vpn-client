@@ -1,10 +1,10 @@
 //! Updates from this repository's GitHub releases.
 //!
-//! Startup always checks for an update and installs one only after the
-//! download URL is HTTPS on this repository's release hosts and the bytes
-//! verify with the minisign key compiled into the app. The saved auto-update
-//! preference is not read or written by that path. A missing manifest or a
-//! bad signature installs nothing.
+//! Startup checks for an update and installs one only when it is strictly
+//! newer, the download URL is HTTPS on this repository's release hosts, and
+//! the bytes verify with the minisign key compiled into the app. An explicit
+//! `auto_update: false` skips that startup install. A missing manifest, a
+//! downgrade, or a bad signature installs nothing.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -58,7 +58,7 @@ fn prefs_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .join("update-settings.json"))
 }
 
-/// Missing, unreadable, or malformed settings stay off.
+/// True only when the file explicitly says so. Missing and malformed stay off.
 pub fn parse_auto_update(raw: Option<&str>) -> bool {
     let Some(raw) = raw else {
         return false;
@@ -68,14 +68,27 @@ pub fn parse_auto_update(raw: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// Startup installs unless the user saved an explicit opt-out. A missing or
+/// unreadable file keeps the signed startup check. A malformed file does too,
+/// so a truncated write cannot silently disable it.
+pub fn startup_update_enabled(raw: Option<&str>) -> bool {
+    let Some(raw) = raw else {
+        return true;
+    };
+    match serde_json::from_str::<UpdatePrefs>(raw) {
+        Ok(prefs) => prefs.auto_update,
+        Err(_) => true,
+    }
+}
+
 pub fn auto_update_enabled(app: &tauri::AppHandle) -> bool {
     let Ok(path) = prefs_path(app) else {
-        return false;
+        return true;
     };
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return false;
+        return true;
     };
-    parse_auto_update(Some(&raw))
+    startup_update_enabled(Some(&raw))
 }
 
 pub fn set_auto_update_enabled(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
@@ -197,6 +210,21 @@ pub fn verify_update_artifact(
     Ok(())
 }
 
+/// The plugin compares versions before download. Check again here so a
+/// downgrade cannot be installed even if that comparator is widened.
+pub fn require_newer_version(current: &str, announced: &str) -> Result<(), String> {
+    let parse = |value: &str| -> Result<Version, String> {
+        Version::parse(value.trim().trim_start_matches('v'))
+            .map_err(|_| "Refusing update: version is not valid".to_string())
+    };
+    let current = parse(current)?;
+    let announced = parse(announced)?;
+    if announced <= current {
+        return Err("Refusing update: release is not newer than the installed version".into());
+    }
+    Ok(())
+}
+
 /// URL and signature gate used immediately before an update is installed.
 pub fn authorize_update_install(
     download_url: &str,
@@ -228,6 +256,14 @@ pub fn get_update_status() -> Option<UpdateReport> {
 pub fn spawn_startup_update(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        if !auto_update_enabled(&app) {
+            remember(UpdateReport {
+                status: "disabled".into(),
+                version: None,
+                message: String::new(),
+            });
+            return;
+        }
         let report = match download_verified_update(&app).await {
             Ok(report) => report,
             Err(message) => UpdateReport {
@@ -292,12 +328,23 @@ async fn download_verified_update(app: &tauri::AppHandle) -> Result<UpdateReport
         &bytes,
         &version,
     )?;
-    // Drop the tunnel only after the artifact is authenticated.
+    require_newer_version(env!("CARGO_PKG_VERSION"), &version)?;
+    // The Windows service is this same executable, so it has to exit before
+    // the installer can replace it. macOS keeps a root-owned copy; stopping
+    // it here also drops routes before the process restarts. If install fails
+    // after this, the tunnel stays down until the user connects again.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     crate::tunnel_daemon::request_shutdown().await;
-    update
-        .install(&bytes)
-        .map_err(|_| "Refusing update: verified artifact could not be installed".to_string())?;
+    if let Err(err) = update.install(&bytes) {
+        let _ = err;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        return Err(
+            "Refusing update: verified artifact could not be installed. The VPN was disconnected; connect again."
+                .into(),
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        return Err("Refusing update: verified artifact could not be installed".into());
+    }
 
     let report = UpdateReport {
         status: "installed".into(),
@@ -322,7 +369,10 @@ mod tests {
     #[test]
     fn release_endpoint_is_https_github() {
         endpoint_is_trusted(RELEASE_ENDPOINT).unwrap();
-        assert!(endpoint_is_trusted("http://github.com/wedima/wireguard-vpn-client/releases/latest/download/latest.json").is_err());
+        assert!(endpoint_is_trusted(
+            "http://github.com/wedima/wireguard-vpn-client/releases/latest/download/latest.json"
+        )
+        .is_err());
         assert!(endpoint_is_trusted("https://example.com/latest.json").is_err());
         assert!(endpoint_is_trusted(
             "https://user:token@github.com/wedima/wireguard-vpn-client/releases/latest/download/latest.json"
@@ -336,8 +386,14 @@ mod tests {
             "https://github.com/wedima/wireguard-vpn-client/releases/download/v0.1.7/app.tar.gz",
         )
         .unwrap();
-        artifact_url_is_trusted("https://objects.githubusercontent.com/github-production-release-asset/abc").unwrap();
-        assert!(artifact_url_is_trusted("http://github.com/wedima/wireguard-vpn-client/releases/download/v1/a").is_err());
+        artifact_url_is_trusted(
+            "https://objects.githubusercontent.com/github-production-release-asset/abc",
+        )
+        .unwrap();
+        assert!(artifact_url_is_trusted(
+            "http://github.com/wedima/wireguard-vpn-client/releases/download/v1/a"
+        )
+        .is_err());
         assert!(artifact_url_is_trusted("https://evil.example/app.exe").is_err());
         assert!(artifact_url_is_trusted(
             "https://github.com/other/repo/releases/download/v1/a.exe"
@@ -379,12 +435,35 @@ mod tests {
         assert_eq!(updater["pubkey"].as_str(), Some(UPDATE_PUBKEY));
         assert_eq!(updater["dangerousInsecureTransportProtocol"], false);
         assert_eq!(updater["requireSignedVersion"], true);
+        assert_eq!(updater["allowDowngrades"], false);
+        assert_eq!(conf["bundle"]["windows"]["allowDowngrades"], false);
         endpoint_is_trusted(updater["endpoints"][0].as_str().unwrap()).unwrap();
     }
 
     #[test]
+    fn startup_updates_stop_only_for_an_explicit_opt_out() {
+        assert!(startup_update_enabled(None));
+        assert!(startup_update_enabled(Some("")));
+        assert!(startup_update_enabled(Some("not json")));
+        assert!(startup_update_enabled(Some("{}")));
+        assert!(startup_update_enabled(Some(r#"{"auto_update":true}"#)));
+        assert!(!startup_update_enabled(Some(r#"{"auto_update":false}"#)));
+    }
+
+    #[test]
+    fn older_and_equal_releases_are_refused() {
+        require_newer_version("0.1.6", "0.1.7").unwrap();
+        require_newer_version("0.1.6", "v0.1.7").unwrap();
+        assert!(require_newer_version("0.1.6", "0.1.6").is_err());
+        assert!(require_newer_version("0.1.6", "0.1.5").is_err());
+        assert!(require_newer_version("0.1.6", "v0.0.1").is_err());
+        assert!(require_newer_version("0.1.6", "not-a-version").is_err());
+    }
+
+    #[test]
     fn signed_fixture_installs_only_after_a_valid_signature() {
-        let url = "https://github.com/wedima/wireguard-vpn-client/releases/download/v0.1.7/payload.bin";
+        let url =
+            "https://github.com/wedima/wireguard-vpn-client/releases/download/v0.1.7/payload.bin";
         authorize_update_install(url, FIXTURE_SIG.trim(), FIXTURE, "0.1.7").unwrap();
         authorize_update_install(url, FIXTURE_SIG.trim(), FIXTURE, "v0.1.7").unwrap();
 

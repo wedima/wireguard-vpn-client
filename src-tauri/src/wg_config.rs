@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use zeroize::Zeroize;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WgInterface {
     pub private_key: [u8; 32],
     pub addresses: Vec<String>,
@@ -8,13 +9,53 @@ pub struct WgInterface {
     pub mtu: u32,
 }
 
-#[derive(Debug, Clone)]
+impl Drop for WgInterface {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+    }
+}
+
+impl std::fmt::Debug for WgInterface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgInterface")
+            .field("private_key", &"<redacted>")
+            .field("addresses", &self.addresses)
+            .field("dns", &self.dns)
+            .field("mtu", &self.mtu)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct WgPeer {
     pub public_key: [u8; 32],
     pub preshared_key: Option<[u8; 32]>,
     pub endpoint: Option<String>,
     pub allowed_ips: Vec<String>,
     pub keepalive: Option<u16>,
+}
+
+impl Drop for WgPeer {
+    fn drop(&mut self) {
+        if let Some(key) = self.preshared_key.as_mut() {
+            key.zeroize();
+        }
+    }
+}
+
+impl std::fmt::Debug for WgPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgPeer")
+            .field("public_key", &"<redacted>")
+            .field(
+                "preshared_key",
+                &self.preshared_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("endpoint", &self.endpoint)
+            .field("allowed_ips", &self.allowed_ips)
+            .field("keepalive", &self.keepalive)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -193,13 +234,25 @@ AllowedIPs = 0.0.0.0/0, fd00::/64
     fn parses_a_normal_config() {
         let cfg = parse(SAMPLE).unwrap();
         assert_eq!(cfg.interface.addresses, vec!["10.0.0.2/32".to_string()]);
-        assert_eq!(cfg.peers[0].endpoint.as_deref(), Some("vpn.example.com:51820"));
+        assert_eq!(
+            cfg.peers[0].endpoint.as_deref(),
+            Some("vpn.example.com:51820")
+        );
     }
 
     #[test]
     fn rejects_command_injection_in_allowed_ips() {
         let bad = SAMPLE.replace("0.0.0.0/0", "0.0.0.0/0'; calc.exe");
         assert!(parse(&bad).is_err());
+    }
+
+    #[test]
+    fn debug_output_redacts_keys() {
+        let cfg = parse(SAMPLE).unwrap();
+        let text = format!("{cfg:?}");
+        assert!(text.contains("<redacted>"));
+        assert!(!text.contains("[0, 0, 0, 0"));
+        assert!(!text.contains("AAAAAAAA"));
     }
 
     #[test]
@@ -210,4 +263,3 @@ AllowedIPs = 0.0.0.0/0, fd00::/64
         let _ = cidr_to_netmask(255);
     }
 }
-

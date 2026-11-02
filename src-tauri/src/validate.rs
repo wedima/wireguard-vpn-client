@@ -112,9 +112,10 @@ pub fn validate_iface_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 64 {
         return Err("Invalid network interface name".into());
     }
-    if !name.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.' | '(' | ')')
-    }) {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.' | '(' | ')'))
+    {
         return Err("Invalid network interface name".into());
     }
     Ok(())
@@ -127,8 +128,26 @@ pub fn validate_posix_install_path(path: &str) -> Result<(), String> {
     if path.chars().any(|c| {
         matches!(
             c,
-            '\'' | '"' | '\\' | '\n' | '\r' | '$' | '`' | ';' | '|' | '&' | '<' | '>' | '('
-                | ')' | '{' | '}' | '*' | '?' | '!' | '#' | '\t'
+            '\'' | '"'
+                | '\\'
+                | '\n'
+                | '\r'
+                | '$'
+                | '`'
+                | ';'
+                | '|'
+                | '&'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '*'
+                | '?'
+                | '!'
+                | '#'
+                | '\t'
         )
     }) {
         return Err("Application path contains characters that cannot be installed safely".into());
@@ -141,11 +160,51 @@ pub fn validate_windows_install_path(path: &str) -> Result<(), String> {
         return Err("Application path is not valid".into());
     }
     if path.chars().any(|c| {
-        matches!(c, '\'' | '"' | '`' | '$' | ';' | '|' | '&' | '\n' | '\r' | '%' | '!' | '\t')
+        matches!(
+            c,
+            '\'' | '"' | '`' | '$' | ';' | '|' | '&' | '\n' | '\r' | '%' | '!' | '\t'
+        )
     }) {
         return Err("Application path contains characters that cannot be installed safely".into());
     }
     Ok(())
+}
+
+/// Block native IPv6 when this tunnel cannot carry it and the config would
+/// otherwise leave a path around a full tunnel. Split-tunnel configs that do
+/// not claim the IPv4 default route keep native IPv6.
+pub fn should_block_native_ipv6(has_ipv6_address: bool, allowed_ips: &[String]) -> bool {
+    if has_ipv6_address {
+        return false;
+    }
+    allowed_ips
+        .iter()
+        .any(|cidr| cidr == "0.0.0.0/0" || cidr == "0/0" || cidr.contains(':'))
+}
+
+pub fn is_ip_address(value: &str) -> bool {
+    value.parse::<Ipv4Addr>().is_ok() || value.parse::<Ipv6Addr>().is_ok()
+}
+
+/// PowerShell and `route` receive this value unquoted. Only a decimal integer
+/// is safe to interpolate.
+pub fn parse_u32_token(value: &str) -> Result<u32, String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 10
+        || !value.chars().all(|c| c.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return Err("Invalid interface index".into());
+    }
+    value
+        .parse()
+        .map_err(|_| "Invalid interface index".to_string())
+}
+
+/// Windows services run in session 0. An interactive `--helper` process does not.
+pub fn is_windows_service_session(session_id: u32) -> bool {
+    session_id == 0
 }
 
 pub fn is_windows_sid(sid: &str) -> bool {
@@ -172,9 +231,7 @@ fn is_dns_name(value: &str) -> bool {
             && label.len() <= 63
             && !label.starts_with('-')
             && !label.ends_with('-')
-            && label
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
     })
 }
 
@@ -206,6 +263,32 @@ mod tests {
         assert!(validate_iface_name("tun0'; calc").is_err());
         assert!(validate_posix_install_path("/tmp/app'; rm -rf /").is_err());
         assert!(validate_windows_install_path("C:\\Program Files\\app.exe & calc").is_err());
+    }
+
+    #[test]
+    fn ipv6_leak_protection_follows_the_tunnel() {
+        let full = vec!["0.0.0.0/0".to_string()];
+        let split = vec!["10.0.0.0/8".to_string()];
+        let v6_only = vec!["fd00::/64".to_string()];
+        assert!(should_block_native_ipv6(false, &full));
+        assert!(should_block_native_ipv6(false, &v6_only));
+        assert!(!should_block_native_ipv6(false, &split));
+        assert!(!should_block_native_ipv6(true, &full));
+    }
+
+    #[test]
+    fn interface_index_is_a_single_integer() {
+        assert_eq!(parse_u32_token("12").unwrap(), 12);
+        assert!(parse_u32_token("12\nRemove-Item C:\\").is_err());
+        assert!(parse_u32_token("12; calc").is_err());
+        assert!(parse_u32_token("").is_err());
+        assert!(parse_u32_token("012").is_err());
+        assert!(is_ip_address("203.0.113.1"));
+        assert!(is_ip_address("2001:db8::1"));
+        assert!(!is_ip_address("203.0.113.1; reboot"));
+        assert!(!is_ip_address("$(reboot)"));
+        assert!(is_windows_service_session(0));
+        assert!(!is_windows_service_session(1));
     }
 
     #[test]
